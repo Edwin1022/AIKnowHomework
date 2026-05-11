@@ -1,0 +1,68 @@
+import uuid
+
+from sqlalchemy import (
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
+from sqlalchemy.orm import DeclarativeBase, relationship
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+
+    id         = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    title      = Column(String, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    # One conversation has many messages
+    # Deleting a conversation automatically deletes all its messages
+    messages = relationship(
+        "Message",
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+        order_by="Message.sequence_number",  # always returned in correct order
+    )
+
+    def __repr__(self):
+        return f"<Conversation id={self.id!r} title={self.title!r}>"
+
+
+class Message(Base):
+    __tablename__ = "messages"
+
+    id              = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    conversation_id = Column(
+        String,
+        ForeignKey("conversations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    role            = Column(String, nullable=False)   # "user" or "assistant"
+    content         = Column(Text, nullable=False)
+    sequence_number = Column(Integer, nullable=False)  # 1-based, per conversation
+    created_at      = Column(DateTime, server_default=func.now(), nullable=False)
+
+    # Safeguard: no two messages in the same conversation can share a position
+    __table_args__ = (
+        UniqueConstraint("conversation_id", "sequence_number", name="uq_conversation_sequence"),
+    )
+
+    conversation = relationship("Conversation", back_populates="messages")
+
+    def __repr__(self):
+        return (
+            f"<Message id={self.id!r} "
+            f"conversation_id={self.conversation_id!r} "
+            f"role={self.role!r} "
+            f"seq={self.sequence_number!r}>"
+        )
