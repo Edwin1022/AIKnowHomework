@@ -1,0 +1,6 @@
+azure-core
+azure-cosmos
+azure-identity
+azure-storage-blob
+fastapi[standard]
+pydantic
