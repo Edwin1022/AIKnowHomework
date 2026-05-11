@@ -1,6 +1,8 @@
 import uuid
+import enum
 
 from sqlalchemy import (
+    CheckConstraint,
     Column,
     DateTime,
     ForeignKey,
@@ -31,12 +33,15 @@ class Conversation(Base):
         "Message",
         back_populates="conversation",
         cascade="all, delete-orphan",
-        order_by="Message.sequence_number",  # always returned in correct order
+        order_by="Message.sequence_number",
     )
 
     def __repr__(self):
         return f"<Conversation id={self.id!r} title={self.title!r}>"
-
+    
+class MessageRole(str, enum.Enum):
+    USER      = "user"
+    ASSISTANT = "assistant"
 
 class Message(Base):
     __tablename__ = "messages"
@@ -55,6 +60,7 @@ class Message(Base):
     # Safeguard: no two messages in the same conversation can share a position
     __table_args__ = (
         UniqueConstraint("conversation_id", "sequence_number", name="uq_conversation_sequence"),
+        CheckConstraint("role IN ('user', 'assistant')", name="ck_message_role"),
     )
 
     conversation = relationship("Conversation", back_populates="messages")
