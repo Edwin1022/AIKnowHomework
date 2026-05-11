@@ -9,5 +9,12 @@
         }
     },
     "python.analysis.typeCheckingMode": "strict",
-    "isort.args": ["--multi-line", "3", "--profile", "black"]
+    "isort.args": [
+        "--multi-line",
+        "3",
+        "--profile",
+        "black"
+    ],
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda"
 }
