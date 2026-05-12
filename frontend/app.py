@@ -5,9 +5,14 @@ API_BASE_URL = "http://127.0.0.1:8000"
 
 st.set_page_config(page_title="LLM Chat App", layout="wide")
 
+DEMO_USERS = ["alice@example.com", "bob@example.com"]
+
 # --- Session State Management ---
 if "current_conv_id" not in st.session_state:
     st.session_state.current_conv_id = None
+
+if "current_user_email" not in st.session_state:
+    st.session_state.current_user_email = DEMO_USERS[0]
 
 if "uploader_key_counter" not in st.session_state:
     st.session_state.uploader_key_counter = 0
@@ -15,7 +20,10 @@ if "uploader_key_counter" not in st.session_state:
 # --- API Client Layer ---
 def create_conversation():
     try:
-        res = requests.post(f"{API_BASE_URL}/conversations")
+        res = requests.post(
+            f"{API_BASE_URL}/conversations",
+            json={"user_email": st.session_state.current_user_email},
+        )
         res.raise_for_status()
         conv = res.json()
         st.session_state.current_conv_id = conv["id"]
@@ -24,7 +32,10 @@ def create_conversation():
 
 def list_conversations():
     try:
-        res = requests.get(f"{API_BASE_URL}/conversations")
+        res = requests.get(
+            f"{API_BASE_URL}/conversations",
+            params={"user_email": st.session_state.current_user_email},
+        )
         res.raise_for_status()
         return res.json()
     except requests.exceptions.RequestException as e:
@@ -75,13 +86,23 @@ def send_chat_message(conv_id, prompt, uploaded_image=None):
 # --- Sidebar: Conversation Management ---
 with st.sidebar:
     st.title("💬 Chat History")
-    
+
+    selected_user = st.selectbox(
+        "👤 Current User",
+        DEMO_USERS,
+        index=DEMO_USERS.index(st.session_state.current_user_email),
+    )
+    if selected_user != st.session_state.current_user_email:
+        st.session_state.current_user_email = selected_user
+        st.session_state.current_conv_id = None
+        st.rerun()
+
+    st.divider()
+
     if st.button("➕ New Conversation", use_container_width=True):
         create_conversation()
         st.rerun()
-    
-    st.divider()
-    
+
     conversations = list_conversations()
     for conv in conversations:
         title = conv["title"] if conv["title"] else "New Conversation"

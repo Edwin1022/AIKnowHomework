@@ -13,7 +13,8 @@ from database import get_db, init_db
 from src.schemas import (
     ConversationResponse,
     ConversationDetailResponse,
-    TitleUpdateRequest
+    CreateConversationRequest,
+    TitleUpdateRequest,
 )
 from src.services import mock_llm_stream, generate_conversation_title
 
@@ -28,16 +29,22 @@ app = FastAPI(title="LLM Chat Application (Async & Modular)", lifespan=lifespan)
 # --- Routes: Chat Management ---
 
 @app.post("/conversations", response_model=ConversationResponse)
-async def create_conversation(db: AsyncSession = Depends(get_db)):
-    new_conv = models.Conversation(id=str(uuid.uuid4()))
+async def create_conversation(request: CreateConversationRequest, db: AsyncSession = Depends(get_db)):
+    new_conv = models.Conversation(id=str(uuid.uuid4()), user_email=request.user_email)
     db.add(new_conv)
     await db.commit()
     await db.refresh(new_conv)
     return new_conv
 
 @app.get("/conversations", response_model=List[ConversationResponse])
-async def list_conversations(skip: int = 0, limit: int = 100, db: AsyncSession = Depends(get_db)):
-    stmt = select(models.Conversation).order_by(models.Conversation.updated_at.desc()).offset(skip).limit(limit)
+async def list_conversations(user_email: str, skip: int = 0, limit: int = 100, db: AsyncSession = Depends(get_db)):
+    stmt = (
+        select(models.Conversation)
+        .where(models.Conversation.user_email == user_email)
+        .order_by(models.Conversation.updated_at.desc())
+        .offset(skip)
+        .limit(limit)
+    )
     result = await db.execute(stmt)
     return result.scalars().all()
 
@@ -102,30 +109,33 @@ async def chat(
     final_content = content + image_info
     message_count = len(conv.messages)
     user_seq = message_count + 1
-    
+    assistant_seq = user_seq + 1
+    turn_number = (message_count // 2) + 1
+
     user_msg = models.Message(
         conversation_id=conversation_id,
         role="user",
         content=final_content,
-        sequence_number=user_seq
+        status="completed",
+        sequence_number=user_seq,
+        turn_number=turn_number,
     )
     db.add(user_msg)
     await db.commit()
 
     async def stream_generator():
         llm_response = ""
-        # 1. Yield chunks asynchronously
         async for chunk in mock_llm_stream(final_content):
             llm_response += chunk
             yield chunk
-        
-        # 2. Save the assistant's message after stream completes
-        assistant_seq = user_seq + 1
+
         assistant_msg = models.Message(
             conversation_id=conversation_id,
             role="assistant",
             content=llm_response.strip(),
-            sequence_number=assistant_seq
+            status="completed",
+            sequence_number=assistant_seq,
+            turn_number=turn_number,
         )
         db.add(assistant_msg)
         

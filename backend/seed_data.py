@@ -15,11 +15,13 @@ from models import Conversation, Message
 
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
-SEED_EMAIL = "test@example.com"
+USER_A = "alice@example.com"
+USER_B = "bob@example.com"
 
 SEED_DATA = [
     {
         "title": "What is machine learning?",
+        "user_email": USER_A,
         "messages": [
             {
                 "role": "user",
@@ -49,6 +51,7 @@ SEED_DATA = [
     },
     {
         "title": "Python list comprehensions",
+        "user_email": USER_A,
         "messages": [
             {
                 "role": "user",
@@ -90,6 +93,7 @@ SEED_DATA = [
     },
     {
         "title": "Explain REST APIs",
+        "user_email": USER_B,
         "messages": [
             {
                 "role": "user",
@@ -128,7 +132,7 @@ async def seed():
             for conv_data in SEED_DATA:
                 conv = Conversation(
                     title=conv_data["title"],
-                    user_email=SEED_EMAIL,
+                    user_email=conv_data["user_email"],
                 )
                 session.add(conv)
                 await session.flush()

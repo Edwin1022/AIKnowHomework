@@ -5,7 +5,7 @@ from pydantic import BaseModel
 class MessageSchema(BaseModel):
     id: str
     role: str
-    content: str
+    content: Optional[str]
     sequence_number: int
     created_at: datetime
 
@@ -15,8 +15,12 @@ class MessageSchema(BaseModel):
 class ConversationBase(BaseModel):
     title: Optional[str] = None
 
+class CreateConversationRequest(BaseModel):
+    user_email: str
+
 class ConversationResponse(ConversationBase):
     id: str
+    user_email: str
     created_at: datetime
     updated_at: datetime
 
