@@ -9,9 +9,9 @@ import os
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from database import engine, init_db
+from backend.db.database import engine, init_db
 from sqlalchemy.ext.asyncio import async_sessionmaker
-from models import Conversation, Message
+from backend.db.models import Conversation, Message
 
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 

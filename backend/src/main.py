@@ -7,16 +7,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
-import models
-from database import get_db, init_db
+import backend.db.models as models
+from backend.db.database import get_db, init_db
 
-from src.schemas import (
+from backend.src.schemas import (
     ConversationResponse,
     ConversationDetailResponse,
     CreateConversationRequest,
     TitleUpdateRequest,
 )
-from src.services import mock_llm_stream, generate_conversation_title
+from backend.src.services import mock_llm_stream, generate_conversation_title
 
 # --- Lifespan Setup for Async DB Initialization ---
 @asynccontextmanager
