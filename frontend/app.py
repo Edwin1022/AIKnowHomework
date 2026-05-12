@@ -9,29 +9,68 @@ st.set_page_config(page_title="LLM Chat App", layout="wide")
 if "current_conv_id" not in st.session_state:
     st.session_state.current_conv_id = None
 
-# Initialize a counter to manage the file uploader's dynamic key
 if "uploader_key_counter" not in st.session_state:
     st.session_state.uploader_key_counter = 0
 
-# --- API Helper Functions ---
-def fetch_conversations():
+# --- API Client Layer ---
+def create_conversation():
+    try:
+        res = requests.post(f"{API_BASE_URL}/conversations")
+        res.raise_for_status()
+        conv = res.json()
+        st.session_state.current_conv_id = conv["id"]
+    except requests.exceptions.RequestException as e:
+        st.error(f"Failed to create conversation: {e}")
+
+def list_conversations():
     try:
         res = requests.get(f"{API_BASE_URL}/conversations")
         res.raise_for_status()
         return res.json()
-    except requests.exceptions.RequestException:
+    except requests.exceptions.RequestException as e:
+        st.error(f"Failed to list conversations: {e}")
         return []
+    
+def read_conversation(conv_id):
+    try:
+        res = requests.get(f"{API_BASE_URL}/conversations/{conv_id}")
+        if res.status_code == 200:
+            return res.json()
+        return None
+    except requests.exceptions.RequestException as e:
+        st.error(f"Failed to read conversation: {e}")
+        return None
 
-def create_conversation():
-    res = requests.post(f"{API_BASE_URL}/conversations")
-    if res.status_code == 200:
-        conv = res.json()
-        st.session_state.current_conv_id = conv["id"]
+def update_conversation_title(conv_id, new_title):
+    try:
+        requests.patch(f"{API_BASE_URL}/conversations/{conv_id}", json={"title": new_title})
+    except requests.exceptions.RequestException as e:
+        st.error(f"Failed to update conversation title: {e}")
 
 def delete_conversation(conv_id):
-    requests.delete(f"{API_BASE_URL}/conversations/{conv_id}")
-    if st.session_state.current_conv_id == conv_id:
-        st.session_state.current_conv_id = None
+    try:
+        requests.delete(f"{API_BASE_URL}/conversations/{conv_id}")
+        if st.session_state.current_conv_id == conv_id:
+            st.session_state.current_conv_id = None
+    except requests.exceptions.RequestException as e:
+        st.error(f"Failed to delete conversation: {e}")
+
+def send_chat_message(conv_id, prompt, uploaded_image=None):
+    url = f"{API_BASE_URL}/conversations/{conv_id}/chat"
+    data = {"content": prompt}
+    files = None
+    
+    if uploaded_image:
+        files = {"image": (uploaded_image.name, uploaded_image.getvalue(), uploaded_image.type)}
+        
+    try:
+        with requests.post(url, data=data, files=files, stream=True) as r:
+            r.raise_for_status()
+            for chunk in r.iter_content(chunk_size=None, decode_unicode=True):
+                if chunk:
+                    yield chunk
+    except requests.exceptions.RequestException as e:
+        yield f"\n\n**[Error connecting to backend: {e}]**"
 
 # --- Sidebar: Conversation Management ---
 with st.sidebar:
@@ -43,7 +82,7 @@ with st.sidebar:
     
     st.divider()
     
-    conversations = fetch_conversations()
+    conversations = list_conversations()
     for conv in conversations:
         title = conv["title"] if conv["title"] else "New Conversation"
         
@@ -64,9 +103,10 @@ with st.sidebar:
 if st.session_state.current_conv_id:
     conv_id = st.session_state.current_conv_id
     
-    res = requests.get(f"{API_BASE_URL}/conversations/{conv_id}")
-    if res.status_code == 200:
-        conv_data = res.json()
+    # Use helper to fetch details
+    conv_data = read_conversation(conv_id)
+    
+    if conv_data:
         messages = conv_data.get("messages", [])
         
         title = conv_data["title"] if conv_data["title"] else "New Conversation"
@@ -77,7 +117,7 @@ if st.session_state.current_conv_id:
             with st.popover("✏️ Edit Title"):
                 new_title = st.text_input("New Title", value=title)
                 if st.button("Save Title"):
-                    requests.patch(f"{API_BASE_URL}/conversations/{conv_id}", json={"title": new_title})
+                    update_conversation_title(conv_id, new_title)
                     st.rerun()
         
         st.divider()
@@ -88,54 +128,36 @@ if st.session_state.current_conv_id:
         
         upload_container = st.container()
         
-        # Create a dynamic key using the counter
         dynamic_uploader_key = f"uploader_{conv_id}_{st.session_state.uploader_key_counter}"
         
         if prompt := st.chat_input("Type your message here..."):
             with st.chat_message("user"):
                 st.markdown(prompt)
             
-            url = f"{API_BASE_URL}/conversations/{conv_id}/chat"
-            data = {"content": prompt}
-            files = None
-            
-            # Retrieve the image using the dynamic key
             uploaded_image = st.session_state.get(dynamic_uploader_key)
-            if uploaded_image:
-                files = {"image": (uploaded_image.name, uploaded_image.getvalue(), uploaded_image.type)}
             
             with st.chat_message("assistant"):
                 response_placeholder = st.empty()
                 full_response = ""
                 
-                try:
-                    with requests.post(url, data=data, files=files, stream=True) as r:
-                        r.raise_for_status()
-                        for chunk in r.iter_content(chunk_size=None, decode_unicode=True):
-                            if chunk:
-                                full_response += chunk
-                                response_placeholder.markdown(full_response + "▌")
-                    
-                    response_placeholder.markdown(full_response)
-                    
-                    # Increment the counter instead of setting the state to None.
-                    # This forces Streamlit to render a brand new st.file_uploader on rerun.
-                    st.session_state.uploader_key_counter += 1
-                    st.rerun()
-                    
-                except requests.exceptions.RequestException as e:
-                    st.error(f"Error connecting to backend: {e}")
+                for chunk in send_chat_message(conv_id, prompt, uploaded_image):
+                    full_response += chunk
+                    response_placeholder.markdown(full_response + "▌")
+                
+                response_placeholder.markdown(full_response)
+                
+                st.session_state.uploader_key_counter += 1
+                st.rerun()
                     
         with upload_container:
-            # Assign the uploader to a variable to check its state
-            uploaded_file = st.file_uploader(
-                "Attach an image", 
+             uploaded_file = st.file_uploader(
+                "Attach an image (Bonus Requirement)", 
                 type=["png", "jpg", "jpeg"], 
-                key=dynamic_uploader_key # Apply the dynamic key here
+                key=dynamic_uploader_key 
             )
-            
-            if uploaded_file is not None:
-                st.image(uploaded_file, caption="Image ready to send", width=250)
+             
+             if uploaded_file is not None:
+                 st.image(uploaded_file, caption="Image ready to send", width=250)
             
     else:
         st.error("Conversation not found. It may have been deleted.")
