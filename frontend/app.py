@@ -95,7 +95,7 @@ with st.sidebar:
                 st.session_state.current_conv_id = conv["id"]
                 st.rerun()
         with col2:
-            if st.button("🗑️", key=f"del_{conv['id']}", help="Delete conversation"):
+            if st.button("", icon=":material/delete:", key=f"del_{conv['id']}", help="Delete conversation"):
                 delete_conversation(conv["id"])
                 st.rerun()
 
@@ -114,9 +114,9 @@ if st.session_state.current_conv_id:
         with header_col1:
             st.header(title)
         with header_col2:
-            with st.popover("✏️ Edit Title"):
-                new_title = st.text_input("New Title", value=title)
-                if st.button("Save Title"):
+            with st.popover("Edit Conversation Title"):
+                new_title = st.text_input("New Conversation Title", value=title)
+                if st.button("Save Conversation Title"):
                     update_conversation_title(conv_id, new_title)
                     st.rerun()
         
