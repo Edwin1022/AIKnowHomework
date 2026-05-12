@@ -150,14 +150,14 @@ if st.session_state.current_conv_id:
                 st.rerun()
                     
         with upload_container:
-             uploaded_file = st.file_uploader(
+            uploaded_file = st.file_uploader(
                 "Attach an image (Bonus Requirement)", 
                 type=["png", "jpg", "jpeg"], 
                 key=dynamic_uploader_key 
             )
-             
-             if uploaded_file is not None:
-                 st.image(uploaded_file, caption="Image ready to send", width=250)
+            
+            if uploaded_file is not None:
+                st.image(uploaded_file, caption="Image ready to send", width=250)
             
     else:
         st.error("Conversation not found. It may have been deleted.")
