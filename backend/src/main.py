@@ -131,7 +131,7 @@ async def chat(
         
         # 3. Generate and update title if first message
         if user_seq == 1:
-            generated_title = generate_conversation_title(final_content, llm_response)
+            generated_title = await generate_conversation_title(final_content, llm_response)
             conv.title = generated_title
             
         await db.commit()
