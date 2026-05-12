@@ -4,14 +4,10 @@ Run from the backend/ directory:
 """
 
 import asyncio
-import sys
-import os
 
-sys.path.insert(0, os.path.dirname(__file__))
-
-from backend.db.database import engine, init_db
+from db.database import engine, init_db
 from sqlalchemy.ext.asyncio import async_sessionmaker
-from backend.db.models import Conversation, Message
+from db.models import Conversation, Message
 
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
