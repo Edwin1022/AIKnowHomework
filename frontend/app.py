@@ -129,7 +129,7 @@ if st.session_state.current_conv_id:
         with upload_container:
             # Assign the uploader to a variable to check its state
             uploaded_file = st.file_uploader(
-                "Attach an image (Bonus Requirement)", 
+                "Attach an image", 
                 type=["png", "jpg", "jpeg"], 
                 key=dynamic_uploader_key # Apply the dynamic key here
             )
