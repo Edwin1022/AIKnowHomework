@@ -8,6 +8,9 @@ class MessageSchema(BaseModel):
     content: Optional[str]
     sequence_number: int
     created_at: datetime
+    model_choice: Optional[str] = None
+    temperature: Optional[float] = None
+    max_output_tokens: Optional[int] = None
 
     class Config:
         from_attributes = True
