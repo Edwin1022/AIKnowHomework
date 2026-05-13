@@ -8,10 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
-load_dotenv()
-
-import models
-from database import get_db, init_db
+import db.models as models
+from db.database import get_db, init_db
 
 from src.schemas import (
     ConversationResponse,
