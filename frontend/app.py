@@ -7,6 +7,17 @@ st.set_page_config(page_title="LLM Chat App", layout="wide")
 
 DEMO_USERS = ["alice@example.com", "bob@example.com"]
 
+AVAILABLE_MODELS = [
+    "llama-3.3-70b-versatile",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "openai/gpt-oss-120b",
+    "qwen/qwen3-32b"
+]
+
+VISION_MODELS = [
+    "meta-llama/llama-4-scout-17b-16e-instruct"
+]
+
 # --- Session State Management ---
 if "current_conv_id" not in st.session_state:
     st.session_state.current_conv_id = None
@@ -16,6 +27,9 @@ if "current_user_email" not in st.session_state:
 
 if "uploader_key_counter" not in st.session_state:
     st.session_state.uploader_key_counter = 0
+
+if "current_model" not in st.session_state:
+    st.session_state.current_model = AVAILABLE_MODELS[0]
 
 # --- API Client Layer ---
 def create_conversation():
@@ -66,9 +80,9 @@ def delete_conversation(conv_id):
     except requests.exceptions.RequestException as e:
         st.error(f"Failed to delete conversation: {e}")
 
-def send_chat_message(conv_id, prompt, uploaded_image=None):
+def send_chat_message(conv_id, prompt, uploaded_image=None, model_choice=AVAILABLE_MODELS[0]):
     url = f"{API_BASE_URL}/conversations/{conv_id}/chat"
-    data = {"content": prompt}
+    data = {"content": prompt, "model_choice": model_choice}
     files = None
     
     if uploaded_image:
@@ -85,8 +99,6 @@ def send_chat_message(conv_id, prompt, uploaded_image=None):
 
 # --- Sidebar: Conversation Management ---
 with st.sidebar:
-    st.title("💬 Chat History")
-
     selected_user = st.selectbox(
         "👤 Current User",
         DEMO_USERS,
@@ -96,12 +108,20 @@ with st.sidebar:
         st.session_state.current_user_email = selected_user
         st.session_state.current_conv_id = None
         st.rerun()
+        
+    st.session_state.current_model = st.selectbox(
+        "🧠 Model",
+        AVAILABLE_MODELS,
+        index=AVAILABLE_MODELS.index(st.session_state.current_model)
+    )
 
     st.divider()
 
     if st.button("➕ New Conversation", use_container_width=True):
         create_conversation()
         st.rerun()
+        
+    st.title("💬 Chats")
 
     conversations = list_conversations()
     for conv in conversations:
@@ -161,7 +181,7 @@ if st.session_state.current_conv_id:
                 response_placeholder = st.empty()
                 full_response = ""
                 
-                for chunk in send_chat_message(conv_id, prompt, uploaded_image):
+                for chunk in send_chat_message(conv_id, prompt, uploaded_image, st.session_state.current_model):
                     full_response += chunk
                     response_placeholder.markdown(full_response + "▌")
                 
@@ -171,10 +191,15 @@ if st.session_state.current_conv_id:
                 st.rerun()
                     
         with upload_container:
+            is_vision_model = st.session_state.current_model in VISION_MODELS
+            
+            uploader_label = "Attach an image" if is_vision_model else "⚠️ Image upload disabled (Switch to a Vision model - meta-llama/llama-4-scout-17b-16e-instruct)"
+            
             uploaded_file = st.file_uploader(
-                "Attach an image (Bonus Requirement)", 
+                uploader_label, 
                 type=["png", "jpg", "jpeg"], 
-                key=dynamic_uploader_key 
+                key=dynamic_uploader_key,
+                disabled=not is_vision_model
             )
             
             if uploaded_file is not None:

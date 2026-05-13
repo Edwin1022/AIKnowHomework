@@ -5,9 +5,9 @@ Run from the backend/ directory:
 
 import asyncio
 
-from db.database import engine, init_db
+from backend.db.database import engine, init_db
 from sqlalchemy.ext.asyncio import async_sessionmaker
-from db.models import Conversation, Message
+from backend.db.models import Conversation, Message
 
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 

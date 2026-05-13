@@ -1,7 +1,12 @@
 import uuid
+import base64
+import io
+import re
+from PIL import Image
 from typing import List, Optional
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
+from datetime import datetime, timezone
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
 
 load_dotenv()
@@ -10,16 +15,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
-import db.models as models
-from db.database import get_db, init_db
+import backend.db.models as models
+from backend.db.database import get_db, init_db
 
-from src.schemas import (
+from backend.src.schemas import (
     ConversationResponse,
     ConversationDetailResponse,
     CreateConversationRequest,
     TitleUpdateRequest,
 )
-from src.services import groq_stream, generate_conversation_title
+from backend.src.services import groq_stream, generate_conversation_title
 
 # --- Lifespan Setup for Async DB Initialization ---
 @asynccontextmanager
@@ -94,9 +99,11 @@ async def delete_conversation(conversation_id: str, db: AsyncSession = Depends(g
 async def chat(
     conversation_id: str,
     content: str = Form(...),
+    model_choice: str = Form("meta-llama/llama-4-scout-17b-16e-instruct"),
     image: Optional[UploadFile] = File(None),
     db: AsyncSession = Depends(get_db)
 ):
+    # 1. Fetch the conversation and its messages
     stmt = select(models.Conversation).options(selectinload(models.Conversation.messages)).where(models.Conversation.id == conversation_id)
     result = await db.execute(stmt)
     conv = result.scalar_one_or_none()
@@ -104,11 +111,45 @@ async def chat(
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
-    image_info = ""
-    if image:
-        image_info = f"\n[User uploaded an image: {image.filename}]"
+    # 2. Prepare the separate payloads for the Database and the LLM
+    full_content = content
+    llm_content_payload = [{"type": "text", "text": content}]
 
-    final_content = content + image_info
+    # 3. Handle Image Upload & Compression
+    if image:
+        image_bytes = await image.read()
+        
+        # Open the image using Pillow
+        img = Image.open(io.BytesIO(image_bytes))
+        
+        # Convert transparent PNGs to RGB so they can be saved as JPEG
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+            
+        # Resize the image so the longest side is a maximum of 800 pixels
+        img.thumbnail((800, 800))
+        
+        # Save the compressed image back to a bytes buffer
+        buffer = io.BytesIO()
+        img.save(buffer, format="JPEG", quality=75) # 75 quality is a good balance of size/clarity
+        compressed_bytes = buffer.getvalue()
+
+        # Base64 encode the COMPRESSED image, not the raw original
+        base64_encoded = base64.b64encode(compressed_bytes).decode("utf-8")
+        mime_type = "image/jpeg" # We forced it to JPEG above
+        
+        # Append the Markdown to the DB content so Streamlit renders it in history
+        full_content += f"\n\n![{image.filename}](data:{mime_type};base64,{base64_encoded})"
+        
+        # Append the actual Base64 data to the LLM's payload in the correct Vision format
+        llm_content_payload.append({
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:{mime_type};base64,{base64_encoded}"
+            }
+        })
+
+    # 4. Calculate sequencing and save the User Message
     message_count = len(conv.messages)
     user_seq = message_count + 1
     assistant_seq = user_seq + 1
@@ -117,25 +158,36 @@ async def chat(
     user_msg = models.Message(
         conversation_id=conversation_id,
         role="user",
-        content=final_content,
+        content=full_content,
         status="completed",
         sequence_number=user_seq,
         turn_number=turn_number,
     )
     db.add(user_msg)
+    
+    conv.updated_at = datetime.now(timezone.utc)
     await db.commit()
 
-    history = [
-        {"role": msg.role, "content": msg.content}
-        for msg in sorted(conv.messages, key=lambda m: m.sequence_number)
-        if msg.sequence_number < user_seq
-    ]
-    history.append({"role": "user", "content": final_content})
+    # 5. Reconstruct history for the LLM context window
+    history = []
+    for msg in sorted(conv.messages, key=lambda m: m.sequence_number):
+        if msg.sequence_number < user_seq:
+            # Strip out massive Base64 strings from history to save tokens
+            clean_content = re.sub(
+                r'!\[[^\]]*\]\(data:image/[^;]+;base64,[^\)]+\)', 
+                '[Image from previous turn]', 
+                msg.content or ""
+            )
+            history.append({"role": msg.role, "content": clean_content})
+    
+    history.append({"role": "user", "content": llm_content_payload})
 
+    # 6. Stream the assistant's response
     async def stream_generator():
         llm_response = ""
         llm_meta: dict[str, object] = {}
-        async for chunk in groq_stream(history):
+        
+        async for chunk in groq_stream(history, model=model_choice):
             if isinstance(chunk, dict):
                 llm_meta = chunk
             else:
@@ -155,8 +207,10 @@ async def chat(
         )
         db.add(assistant_msg)
 
+        conv.updated_at = datetime.now(timezone.utc)
+
         if user_seq == 1:
-            generated_title = await generate_conversation_title(final_content, llm_response)
+            generated_title = await generate_conversation_title(content, llm_response)
             conv.title = generated_title
 
         await db.commit()
