@@ -58,6 +58,8 @@ class Message(Base):
     status = Column(String, nullable=False, default="completed")
     sequence_number = Column(Integer, nullable=False)
     turn_number = Column(Integer, nullable=True)
+    branch_id = Column(Integer, nullable=False, default=0)
+    fork_start_seq = Column(Integer, nullable=True)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
     # Only populated on assistant rows
@@ -68,7 +70,8 @@ class Message(Base):
 
     __table_args__ = (
         UniqueConstraint(
-            "conversation_id", "sequence_number", name="uq_conversation_sequence"
+            "conversation_id", "branch_id", "sequence_number",
+            name="uq_conversation_branch_sequence",
         ),
         CheckConstraint("role IN ('user', 'assistant')", name="ck_message_role"),
         CheckConstraint(
@@ -82,6 +85,7 @@ class Message(Base):
         ),
         Index("ix_message_conversation_id", "conversation_id"),
         Index("ix_message_turn_number", "conversation_id", "turn_number"),
+        Index("ix_message_branch", "conversation_id", "branch_id"),
     )
 
     conversation = relationship("Conversation", back_populates="messages")
