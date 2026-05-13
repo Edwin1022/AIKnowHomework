@@ -1,6 +1,7 @@
 import uuid
 from typing import List, Optional
 from contextlib import asynccontextmanager
+from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,7 +17,7 @@ from src.schemas import (
     CreateConversationRequest,
     TitleUpdateRequest,
 )
-from src.services import mock_llm_stream, generate_conversation_title
+from src.services import groq_stream, generate_conversation_title
 
 # --- Lifespan Setup for Async DB Initialization ---
 @asynccontextmanager
@@ -50,11 +51,10 @@ async def list_conversations(user_email: str, skip: int = 0, limit: int = 100, d
 
 @app.get("/conversations/{conversation_id}", response_model=ConversationDetailResponse)
 async def read_conversation(conversation_id: str, db: AsyncSession = Depends(get_db)):
-    # selectinload fetches the relationship eagerly, required for async sessions
     stmt = select(models.Conversation).options(selectinload(models.Conversation.messages)).where(models.Conversation.id == conversation_id)
     result = await db.execute(stmt)
     conv = result.scalar_one_or_none()
-    
+
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return conv
@@ -64,10 +64,10 @@ async def update_conversation_title(conversation_id: str, request: TitleUpdateRe
     stmt = select(models.Conversation).where(models.Conversation.id == conversation_id)
     result = await db.execute(stmt)
     conv = result.scalar_one_or_none()
-    
+
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    
+
     conv.title = request.title
     await db.commit()
     await db.refresh(conv)
@@ -78,10 +78,10 @@ async def delete_conversation(conversation_id: str, db: AsyncSession = Depends(g
     stmt = select(models.Conversation).where(models.Conversation.id == conversation_id)
     result = await db.execute(stmt)
     conv = result.scalar_one_or_none()
-    
+
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    
+
     await db.delete(conv)
     await db.commit()
     return {"message": "Conversation deleted successfully"}
@@ -90,15 +90,15 @@ async def delete_conversation(conversation_id: str, db: AsyncSession = Depends(g
 
 @app.post("/conversations/{conversation_id}/chat")
 async def chat(
-    conversation_id: str, 
-    content: str = Form(...), 
+    conversation_id: str,
+    content: str = Form(...),
     image: Optional[UploadFile] = File(None),
     db: AsyncSession = Depends(get_db)
 ):
     stmt = select(models.Conversation).options(selectinload(models.Conversation.messages)).where(models.Conversation.id == conversation_id)
     result = await db.execute(stmt)
     conv = result.scalar_one_or_none()
-    
+
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
@@ -123,11 +123,22 @@ async def chat(
     db.add(user_msg)
     await db.commit()
 
+    history = [
+        {"role": msg.role, "content": msg.content}
+        for msg in sorted(conv.messages, key=lambda m: m.sequence_number)
+        if msg.sequence_number < user_seq
+    ]
+    history.append({"role": "user", "content": final_content})
+
     async def stream_generator():
         llm_response = ""
-        async for chunk in mock_llm_stream(final_content):
-            llm_response += chunk
-            yield chunk
+        llm_meta: dict[str, object] = {}
+        async for chunk in groq_stream(history):
+            if isinstance(chunk, dict):
+                llm_meta = chunk
+            else:
+                llm_response += chunk
+                yield chunk
 
         assistant_msg = models.Message(
             conversation_id=conversation_id,
@@ -136,14 +147,16 @@ async def chat(
             status="completed",
             sequence_number=assistant_seq,
             turn_number=turn_number,
+            model_choice=llm_meta.get("model"),
+            temperature=llm_meta.get("temperature"),
+            max_output_tokens=llm_meta.get("max_tokens"),
         )
         db.add(assistant_msg)
-        
-        # 3. Generate and update title if first message
+
         if user_seq == 1:
             generated_title = await generate_conversation_title(final_content, llm_response)
             conv.title = generated_title
-            
+
         await db.commit()
 
     return StreamingResponse(stream_generator(), media_type="text/plain")

@@ -1,12 +1,42 @@
-import asyncio
-from typing import AsyncGenerator
+import os
+from typing import AsyncGenerator, Union
+from groq import AsyncGroq
+from groq.types.chat import ChatCompletionMessageParam
 
-async def mock_llm_stream(prompt: str) -> AsyncGenerator[str, None]:
-    words = f"This is a streamed response to: {prompt}".split()
-    for word in words:
-        yield word + " "
-        await asyncio.sleep(0.1)
+_client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY"))
+
+GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_TEMPERATURE = 0.7
+GROQ_MAX_TOKENS = 2048
+
+async def groq_stream(messages: list[ChatCompletionMessageParam]) -> AsyncGenerator[Union[str, dict[str, object]], None]:
+    stream = await _client.chat.completions.create(
+        model=GROQ_MODEL,
+        messages=messages,
+        stream=True,
+        temperature=GROQ_TEMPERATURE,
+        max_tokens=GROQ_MAX_TOKENS,
+    )
+    async for chunk in stream:
+        delta = chunk.choices[0].delta.content
+        if delta:
+            yield delta
+    # Final yield carries metadata so the caller can persist it
+    yield {"model": GROQ_MODEL, "temperature": GROQ_TEMPERATURE, "max_tokens": GROQ_MAX_TOKENS}
 
 async def generate_conversation_title(question: str, answer: str) -> str:
-    await asyncio.sleep(0.5)
-    return f"Chat about {question[:10]}..."
+    response = await _client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    f"Generate a short 4-6 word title for a conversation that starts with:\n"
+                    f"User: {question[:200]}\nAssistant: {answer[:200]}\n"
+                    f"Reply with only the title, no quotes or punctuation."
+                ),
+            }
+        ],
+        max_tokens=20,
+    )
+    return response.choices[0].message.content.strip()
