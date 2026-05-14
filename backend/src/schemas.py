@@ -7,6 +7,9 @@ class MessageSchema(BaseModel):
     role: str
     content: Optional[str]
     sequence_number: int
+    turn_number: Optional[int] = None
+    branch_id: int = 0
+    fork_start_seq: Optional[int] = None
     created_at: datetime
     model_choice: Optional[str] = None
     temperature: Optional[float] = None
