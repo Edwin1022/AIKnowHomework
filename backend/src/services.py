@@ -9,7 +9,7 @@ GROQ_MODEL = "llama-3.3-70b-versatile"
 GROQ_TEMPERATURE = 0.7
 GROQ_MAX_TOKENS = 2048
 
-async def groq_stream(messages: list[ChatCompletionMessageParam], model: str = GROQ_MODEL) -> AsyncGenerator[Union[str, dict[str, object]], None]:
+async def groq_stream(messages: list[ChatCompletionMessageParam], model: str) -> AsyncGenerator[Union[str, dict[str, object]], None]:
     stream = await _client.chat.completions.create(
         model=model,
         messages=messages,

@@ -115,8 +115,8 @@ def compress_image_sync(image_bytes: bytes) -> bytes:
 async def chat(
     conversation_id: str,
     content: str = Form(...),
-    model_choice: str = Form("meta-llama/llama-4-scout-17b-16e-instruct"),
     image: Optional[UploadFile] = File(None),
+    model_choice: str = Form(...),
     db: AsyncSession = Depends(get_db)
 ):
     # 1. Fetch the conversation and its messages
