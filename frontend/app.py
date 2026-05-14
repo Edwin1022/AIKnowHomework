@@ -1,5 +1,7 @@
 import streamlit as st
 import requests
+from typing import Any, Generator, Optional
+from streamlit.runtime.uploaded_file_manager import UploadedFile
 
 API_BASE_URL = "http://127.0.0.1:8000"
 
@@ -32,7 +34,7 @@ if "current_model" not in st.session_state:
     st.session_state.current_model = AVAILABLE_MODELS[0]
 
 # --- API Client Layer ---
-def create_conversation():
+def create_conversation() -> None:
     try:
         res = requests.post(
             f"{API_BASE_URL}/conversations",
@@ -44,7 +46,7 @@ def create_conversation():
     except requests.exceptions.RequestException as e:
         st.error(f"Failed to create conversation: {e}")
 
-def list_conversations():
+def list_conversations() -> list[dict[str, Any]]:
     try:
         res = requests.get(
             f"{API_BASE_URL}/conversations",
@@ -56,7 +58,7 @@ def list_conversations():
         st.error(f"Failed to list conversations: {e}")
         return []
     
-def read_conversation(conv_id):
+def read_conversation(conv_id: str) -> Optional[dict[str, Any]]:
     try:
         res = requests.get(f"{API_BASE_URL}/conversations/{conv_id}")
         if res.status_code == 200:
@@ -66,13 +68,13 @@ def read_conversation(conv_id):
         st.error(f"Failed to read conversation: {e}")
         return None
 
-def update_conversation_title(conv_id, new_title):
+def update_conversation_title(conv_id: str, new_title: str) -> None:
     try:
         requests.patch(f"{API_BASE_URL}/conversations/{conv_id}", json={"title": new_title})
     except requests.exceptions.RequestException as e:
         st.error(f"Failed to update conversation title: {e}")
 
-def delete_conversation(conv_id):
+def delete_conversation(conv_id: str) -> None:
     try:
         requests.delete(f"{API_BASE_URL}/conversations/{conv_id}")
         if st.session_state.current_conv_id == conv_id:
@@ -80,7 +82,12 @@ def delete_conversation(conv_id):
     except requests.exceptions.RequestException as e:
         st.error(f"Failed to delete conversation: {e}")
 
-def send_chat_message(conv_id, prompt, uploaded_image=None, model_choice=AVAILABLE_MODELS[0]):
+def send_chat_message(
+    conv_id: str, 
+    prompt: str, 
+    uploaded_image: Optional[UploadedFile] = None, 
+    model_choice: str = AVAILABLE_MODELS[0]
+) -> Generator[str, None, None]:
     url = f"{API_BASE_URL}/conversations/{conv_id}/chat"
     data = {"content": prompt, "model_choice": model_choice}
     files = None
@@ -144,7 +151,6 @@ with st.sidebar:
 if st.session_state.current_conv_id:
     conv_id = st.session_state.current_conv_id
     
-    # Use helper to fetch details
     conv_data = read_conversation(conv_id)
     
     if conv_data:
@@ -165,7 +171,8 @@ if st.session_state.current_conv_id:
         
         for msg in messages:
             with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
+                display_content = msg["content"].split("🖼️")[0].strip()
+                st.markdown(display_content)
         
         upload_container = st.container()
         
@@ -183,9 +190,11 @@ if st.session_state.current_conv_id:
                 
                 for chunk in send_chat_message(conv_id, prompt, uploaded_image, st.session_state.current_model):
                     full_response += chunk
-                    response_placeholder.markdown(full_response + "▌")
+                    display_text = full_response.split("🖼️")[0].strip()
+                    response_placeholder.markdown(display_text + "▌")
                 
-                response_placeholder.markdown(full_response)
+                final_display = full_response.split("🖼️")[0].strip()
+                response_placeholder.markdown(final_display)
                 
                 st.session_state.uploader_key_counter += 1
                 st.rerun()

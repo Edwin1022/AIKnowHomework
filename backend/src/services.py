@@ -39,4 +39,5 @@ async def generate_conversation_title(question: str, answer: str) -> str:
         ],
         max_tokens=20,
     )
-    return response.choices[0].message.content.strip()
+    content = response.choices[0].message.content
+    return content.strip() if content else ""
