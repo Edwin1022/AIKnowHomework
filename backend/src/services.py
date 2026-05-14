@@ -9,9 +9,9 @@ GROQ_MODEL = "llama-3.3-70b-versatile"
 GROQ_TEMPERATURE = 0.7
 GROQ_MAX_TOKENS = 2048
 
-async def groq_stream(messages: list[ChatCompletionMessageParam]) -> AsyncGenerator[Union[str, dict[str, object]], None]:
+async def groq_stream(messages: list[ChatCompletionMessageParam], model: str) -> AsyncGenerator[Union[str, dict[str, object]], None]:
     stream = await _client.chat.completions.create(
-        model=GROQ_MODEL,
+        model=model,
         messages=messages,
         stream=True,
         temperature=GROQ_TEMPERATURE,
@@ -21,12 +21,12 @@ async def groq_stream(messages: list[ChatCompletionMessageParam]) -> AsyncGenera
         delta = chunk.choices[0].delta.content
         if delta:
             yield delta
-    # Final yield carries metadata so the caller can persist it
-    yield {"model": GROQ_MODEL, "temperature": GROQ_TEMPERATURE, "max_tokens": GROQ_MAX_TOKENS}
+
+    yield {"model": model, "temperature": GROQ_TEMPERATURE, "max_tokens": GROQ_MAX_TOKENS}
 
 async def generate_conversation_title(question: str, answer: str) -> str:
     response = await _client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model=GROQ_MODEL,
         messages=[
             {
                 "role": "user",
@@ -39,4 +39,5 @@ async def generate_conversation_title(question: str, answer: str) -> str:
         ],
         max_tokens=20,
     )
-    return response.choices[0].message.content.strip()
+    content = response.choices[0].message.content
+    return content.strip() if content else ""

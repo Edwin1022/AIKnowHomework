@@ -1,25 +1,35 @@
 import uuid
-from typing import List, Optional
+import base64
+import io
+import asyncio
+import re
+import pprint
+from PIL import Image
+from typing import List, Optional, Dict, Any, Union, cast
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
-from dotenv import load_dotenv
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
 
+from dotenv import load_dotenv
 load_dotenv()
+
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
-import db.models as models
-from db.database import get_db, init_db
+from groq.types.chat import ChatCompletionMessageParam
 
-from src.schemas import (
+import backend.db.models as models
+from backend.db.database import get_db, init_db
+
+from backend.src.schemas import (
     ConversationResponse,
     ConversationDetailResponse,
     CreateConversationRequest,
     TitleUpdateRequest,
 )
-from src.services import groq_stream, generate_conversation_title
+from backend.src.services import groq_stream, generate_conversation_title
 
 # --- Lifespan Setup for Async DB Initialization ---
 @asynccontextmanager
@@ -70,7 +80,7 @@ async def update_conversation_title(conversation_id: str, request: TitleUpdateRe
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
-    conv.title = request.title
+    conv.title = request.title # type: ignore
     await db.commit()
     await db.refresh(conv)
     return conv
@@ -90,14 +100,26 @@ async def delete_conversation(conversation_id: str, db: AsyncSession = Depends(g
 
 # --- Routes: Chat Functionality ---
 
+def compress_image_sync(image_bytes: bytes) -> bytes:
+    img = Image.open(io.BytesIO(image_bytes))
+    if img.mode in ("RGBA", "P"):
+        img = img.convert("RGB")
+        
+    img.thumbnail((400, 400))
+    buffer = io.BytesIO()
+    img.save(buffer, format="JPEG", quality=75)
+    return buffer.getvalue()
+
 @app.post("/conversations/{conversation_id}/chat")
 async def chat(
     conversation_id: str,
     content: str = Form(...),
-    image: Optional[UploadFile] = File(None),
+    model_choice: str = Form(...),
     branch_id: int = Form(0),
+    image: Optional[UploadFile] = File(None),
     db: AsyncSession = Depends(get_db)
 ):
+    # 1. Fetch the conversation and its messages
     stmt = select(models.Conversation).options(selectinload(models.Conversation.messages)).where(models.Conversation.id == conversation_id)
     result = await db.execute(stmt)
     conv = result.scalar_one_or_none()
@@ -105,29 +127,47 @@ async def chat(
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
-    image_info = ""
+    # 2. Prepare the payloads and Handle Image Upload (LLM-Integration)
+    full_content = content
+    llm_content_payload: Union[str, List[Dict[str, Any]]] 
+
     if image:
-        image_info = f"\n[User uploaded an image: {image.filename}]"
+        image_bytes = await image.read()
+        compressed_bytes = await asyncio.to_thread(compress_image_sync, image_bytes)
 
-    final_content = content + image_info
+        base64_encoded = base64.b64encode(compressed_bytes).decode("utf-8")
+        mime_type = "image/jpeg"
+        
+        full_content += f"\n\n![{image.filename}](data:{mime_type};base64,{base64_encoded})"
+        
+        secret_instruction = (
+            "\n\n[SYSTEM NOTE: The user just attached an image. After fulfilling their main request, "
+            "you MUST append a section labeled '🖼️ Image Memory:' where you briefly but as accurately as possible "
+            "describe all key details, objects, colors, and text in the image. You will need this "
+            "description to answer follow-up questions because the image pixels will be deleted "
+            "after this turn.]"
+        )
+        
+        llm_content_payload = [
+            {"type": "text", "text": content + secret_instruction},
+            {"type": "image_url", "image_url": { "url": f"data:{mime_type};base64,{base64_encoded}"}}
+        ]
+    else:
+        llm_content_payload = content
 
+    # 3. Calculate sequencing based on active branch (HEAD)
     if branch_id == 0:
-        # Main thread — unchanged logic
         message_count = len([m for m in conv.messages if m.branch_id == 0])
         user_seq = message_count + 1
         assistant_seq = user_seq + 1
         turn_number = (message_count // 2) + 1
         fork_start_seq = None
-
-        history = [
-            {"role": msg.role, "content": msg.content}
-            for msg in sorted(
-                (m for m in conv.messages if m.branch_id == 0),
-                key=lambda m: m.sequence_number,
-            )
-        ]
+        
+        raw_history_messages = sorted(
+            [m for m in conv.messages if m.branch_id == 0 and m.sequence_number < user_seq],
+            key=lambda m: m.sequence_number,
+        )
     else:
-        # Fork branch — hybrid history
         branch_messages = sorted(
             [m for m in conv.messages if m.branch_id == branch_id],
             key=lambda m: m.sequence_number,
@@ -145,15 +185,13 @@ async def chat(
             [m for m in conv.messages if m.branch_id == 0 and m.sequence_number < fork_start_seq],
             key=lambda m: m.sequence_number,
         )
-        history = [{"role": m.role, "content": m.content} for m in trunk_before]
-        history += [{"role": m.role, "content": m.content} for m in branch_messages]
+        raw_history_messages = trunk_before + branch_messages
 
-    history.append({"role": "user", "content": final_content})
-
+    # 4. Save the User Message
     user_msg = models.Message(
         conversation_id=conversation_id,
         role="user",
-        content=final_content,
+        content=full_content,
         status="completed",
         sequence_number=user_seq,
         turn_number=turn_number,
@@ -161,12 +199,60 @@ async def chat(
         fork_start_seq=fork_start_seq,
     )
     db.add(user_msg)
+    
+    conv.updated_at = datetime.now(timezone.utc).replace(tzinfo=None) # type: ignore
     await db.commit()
 
+    # 5. Reconstruct history with Regex Stripping and Sticky Memory (Merged Logic)
+    sticky_image_memory = ""
+    
+    for msg in raw_history_messages:
+        if msg.role == "assistant" and "🖼️ Image Memory:" in (msg.content or ""):
+            parts = msg.content.split("🖼️ Image Memory:")
+            sticky_image_memory = "🖼️ Image Memory:" + parts[-1]
+    
+    system_instruction = (
+        "You are a highly capable AI. "
+        "The chat UI strips old images from the history to save tokens. "
+        "If the user asks a follow-up question about an image, use the text descriptions "
+        "from your past responses to answer. NEVER refuse by saying 'there is no image provided' "
+        "or 'I cannot see the image'.\n\n"
+    )
+    
+    if sticky_image_memory:
+        system_instruction += (
+            f"The user previously uploaded an image. Use the following details "
+            f"to answer any follow-up questions about it:\n\n{sticky_image_memory}"
+        )
+
+    history: List[Dict[str, Any]] = [{"role": "system", "content": system_instruction}]
+    
+    for msg in raw_history_messages:
+        clean_content = re.sub(
+            r'!\[.*?\]\(data:.*?;base64,.*?\)', 
+            '[Image from previous turn]', 
+            msg.content or "",
+            flags=re.DOTALL
+        )
+        history.append({"role": msg.role, "content": clean_content})
+    
+    current_message: Dict[str, Any] = {
+        "role": "user", 
+        "content": llm_content_payload
+    }
+    history.append(current_message)
+    
+    print("\n" + "="*50)
+    print("FINAL HISTORY PAYLOAD GOING TO GROQ:")
+    pprint.pprint(history, width=120)
+    print("="*50 + "\n")
+
+    # 6. Stream the assistant's response
     async def stream_generator():
         llm_response = ""
         llm_meta: dict[str, object] = {}
-        async for chunk in groq_stream(history):  # type: ignore[arg-type]
+        
+        async for chunk in groq_stream(cast(list[ChatCompletionMessageParam], history), model=model_choice):
             if isinstance(chunk, dict):
                 llm_meta = chunk
             else:
@@ -188,20 +274,23 @@ async def chat(
         )
         db.add(assistant_msg)
 
+        conv.updated_at = datetime.now(timezone.utc).replace(tzinfo=None) # type: ignore
+
         if branch_id == 0 and user_seq == 1:
-            generated_title = await generate_conversation_title(final_content, llm_response)
-            conv.title = generated_title
+            generated_title = str(await generate_conversation_title(content, llm_response))
+            conv.title = generated_title # type: ignore
 
         await db.commit()
 
     return StreamingResponse(stream_generator(), media_type="text/plain")
-
 
 @app.post("/conversations/{conversation_id}/messages/{message_id}/fork")
 async def fork_message(
     conversation_id: str,
     message_id: str,
     content: str = Form(...),
+    model_choice: str = Form("llama-3.3-70b-versatile"), 
+    image: Optional[UploadFile] = File(None), # Upgraded to accept images
     db: AsyncSession = Depends(get_db),
 ):
     stmt = select(models.Conversation).options(selectinload(models.Conversation.messages)).where(models.Conversation.id == conversation_id)
@@ -222,18 +311,97 @@ async def fork_message(
     fork_start_seq = target.sequence_number
     new_branch_id = max(m.branch_id for m in conv.messages) + 1
 
-    # LLM context: branch-0 messages strictly before the fork point
+    # --- 1. Image Retention & Payload Logic ---
+    full_content = content
+    llm_content_payload: Union[str, List[Dict[str, Any]]] = content
+
+    if image:
+        # If the user uploads a brand new image during the edit
+        image_bytes = await image.read()
+        compressed_bytes = await asyncio.to_thread(compress_image_sync, image_bytes)
+        base64_encoded = base64.b64encode(compressed_bytes).decode("utf-8")
+        mime_type = "image/jpeg"
+        full_content += f"\n\n![{image.filename}](data:{mime_type};base64,{base64_encoded})"
+        
+        secret_instruction = (
+            "\n\n[SYSTEM NOTE: The user just attached an image. After fulfilling their main request, "
+            "you MUST append a section labeled '🖼️ Image Memory:' where you briefly but as accurately as possible "
+            "describe all key details, objects, colors, and text in the image. You will need this "
+            "description to answer follow-up questions because the image pixels will be deleted "
+            "after this turn.]"
+        )
+        llm_content_payload = [
+            {"type": "text", "text": content + secret_instruction},
+            {"type": "image_url", "image_url": { "url": f"data:{mime_type};base64,{base64_encoded}"}}
+        ]
+    else:
+        # If no new image, check if the TARGET message being edited originally had an image!
+        original_image_match = re.search(r'!\[(.*?)\]\((data:image/[^;]+;base64,[^\)]+)\)', target.content or "")
+        if original_image_match:
+            filename = original_image_match.group(1)
+            image_data_url = original_image_match.group(2)
+            
+            # Carry the old image over to the new branch's database record
+            full_content += f"\n\n![{filename}]({image_data_url})"
+            
+            secret_instruction = (
+                "\n\n[SYSTEM NOTE: The user just attached an image. After fulfilling their main request, "
+                "you MUST append a section labeled '🖼️ Image Memory:' where you briefly but as accurately as possible "
+                "describe all key details, objects, colors, and text in the image. You will need this "
+                "description to answer follow-up questions because the image pixels will be deleted "
+                "after this turn.]"
+            )
+            
+            # Reconstruct the multimodal payload for Groq
+            llm_content_payload = [
+                {"type": "text", "text": content + secret_instruction},
+                {"type": "image_url", "image_url": { "url": image_data_url }}
+            ]
+
+    # --- 2. Reconstruct History & Sticky Memory ---
     trunk_before = sorted(
         [m for m in conv.messages if m.branch_id == 0 and m.sequence_number < fork_start_seq],
         key=lambda m: m.sequence_number,
     )
-    history = [{"role": m.role, "content": m.content} for m in trunk_before]
-    history.append({"role": "user", "content": content})
 
+    sticky_image_memory = ""
+    for msg in trunk_before:
+        if msg.role == "assistant" and "🖼️ Image Memory:" in (msg.content or ""):
+            parts = msg.content.split("🖼️ Image Memory:")
+            sticky_image_memory = "🖼️ Image Memory:" + parts[-1]
+            
+    system_instruction = (
+        "You are a highly capable AI. "
+        "The chat UI strips old images from the history to save tokens. "
+        "If the user asks a follow-up question about an image, use the text descriptions "
+        "from your past responses to answer. NEVER refuse by saying 'there is no image provided' "
+        "or 'I cannot see the image'.\n\n"
+    )
+    
+    if sticky_image_memory:
+        system_instruction += (
+            f"The user previously uploaded an image. Use the following details "
+            f"to answer any follow-up questions about it:\n\n{sticky_image_memory}"
+        )
+
+    history: List[Dict[str, Any]] = [{"role": "system", "content": system_instruction}]
+
+    for m in trunk_before:
+        clean_content = re.sub(
+            r'!\[.*?\]\(data:.*?;base64,.*?\)', 
+            '[Image from previous turn]', 
+            m.content or "",
+            flags=re.DOTALL
+        )
+        history.append({"role": m.role, "content": clean_content})
+        
+    history.append({"role": "user", "content": llm_content_payload})
+
+    # --- 3. Save and Stream ---
     fork_user_msg = models.Message(
         conversation_id=conversation_id,
         role="user",
-        content=content,
+        content=full_content,
         status="completed",
         sequence_number=1,
         turn_number=1,
@@ -246,7 +414,8 @@ async def fork_message(
     async def stream_generator():
         llm_response = ""
         llm_meta: dict[str, object] = {}
-        async for chunk in groq_stream(history):  # type: ignore[arg-type]
+        
+        async for chunk in groq_stream(cast(list[ChatCompletionMessageParam], history), model=model_choice):
             if isinstance(chunk, dict):
                 llm_meta = chunk
             else:
