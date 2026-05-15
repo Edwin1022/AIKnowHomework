@@ -9,8 +9,9 @@ from typing import List, Optional, Dict, Any, Union, cast
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
+from pathlib import Path
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
 
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
