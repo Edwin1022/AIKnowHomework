@@ -1,6 +1,8 @@
 import streamlit as st
 import requests
 import re
+import pandas as pd
+import altair as alt
 from typing import Any, Generator, Optional
 from streamlit.runtime.uploaded_file_manager import UploadedFile
 
@@ -137,6 +139,55 @@ def fork_message(
             st.session_state._last_fork_branch_id = new_branch_id
     except requests.exceptions.RequestException as e:
         yield f"\n\n**[Error connecting to backend: {e}]**" 
+        
+def get_user_cost(user_email: str) -> Optional[dict[str, Any]]:
+    try:
+        res = requests.get(f"{API_BASE_URL}/users/{user_email}/cost")
+        if res.status_code == 200:
+            return res.json()
+        return None
+    except requests.exceptions.RequestException as e:
+        st.error(f"Failed to fetch cost data: {e}")
+        return None
+
+# --- Cost Analytics Dashboard ---
+@st.dialog("📊 Cost Analytics Dashboard", width="large")
+def show_cost_dashboard():
+    st.markdown(f"### 💰 Spend Dashboard")
+    st.caption(f"User: `{st.session_state.current_user_email}`")
+    
+    cost_data = get_user_cost(st.session_state.current_user_email)
+    
+    if cost_data:
+        st.metric(label="Total API Spend", value=f"${cost_data.get('total_cost_usd', 0):.4f}")
+        
+        breakdown = cost_data.get("breakdown", [])
+        if breakdown:
+            st.write("**Cost by Model**")
+            
+            df = pd.DataFrame(breakdown)
+            
+            chart = alt.Chart(df).mark_bar(color="red").encode(
+                x=alt.X("cost_usd:Q", title="Cost ($)"),
+                y=alt.Y(
+                    "model:N", 
+                    title=None, 
+                    sort="-x", # Sorts the longest bars to the top
+                    axis=alt.Axis(labelLimit=500) # Prevents Streamlit from cutting off long model names
+                ),
+                tooltip=["model", "cost_usd"]
+            )
+            st.altair_chart(chart, use_container_width=True)
+            
+            display_df = df.rename(columns={
+                "model": "Model", 
+                "prompt_tokens": "Input Tokens",
+                "completion_tokens": "Output Tokens",
+                "cost_usd": "Cost ($)"
+            })
+            st.dataframe(display_df, hide_index=True, use_container_width=True)
+        else:
+            st.info("No tokens used yet. Start chatting!")
 
 # --- Sidebar: Conversation Management ---
 with st.sidebar:
@@ -155,6 +206,9 @@ with st.sidebar:
         AVAILABLE_MODELS,
         index=AVAILABLE_MODELS.index(st.session_state.current_model)
     )
+    
+    if st.button("📊 View Cost Analytics", use_container_width=True):
+        show_cost_dashboard()
 
     st.divider()
 

@@ -67,6 +67,10 @@ class Message(Base):
     seed = Column(Integer, nullable=True)
     max_output_tokens = Column(Integer, nullable=True)
     model_choice = Column(String, nullable=True)
+    
+    prompt_tokens = Column(Integer, nullable=True)
+    completion_tokens = Column(Integer, nullable=True)
+    total_tokens = Column(Integer, nullable=True)
 
     __table_args__ = (
         UniqueConstraint(

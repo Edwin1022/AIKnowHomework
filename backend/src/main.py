@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
+from sqlalchemy import func
 load_dotenv()
 
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
@@ -29,7 +30,7 @@ from backend.src.schemas import (
     CreateConversationRequest,
     TitleUpdateRequest,
 )
-from backend.src.services import groq_stream, generate_conversation_title
+from backend.src.services import PRICING_TIERS, groq_stream, generate_conversation_title
 
 # --- Lifespan Setup for Async DB Initialization ---
 @asynccontextmanager
@@ -271,6 +272,9 @@ async def chat(
             model_choice=llm_meta.get("model"),
             temperature=llm_meta.get("temperature"),
             max_output_tokens=llm_meta.get("max_tokens"),
+            prompt_tokens=llm_meta.get("prompt_tokens"),
+            completion_tokens=llm_meta.get("completion_tokens"),
+            total_tokens=llm_meta.get("total_tokens"),
         )
         db.add(assistant_msg)
 
@@ -434,9 +438,59 @@ async def fork_message(
             model_choice=llm_meta.get("model"),
             temperature=llm_meta.get("temperature"),
             max_output_tokens=llm_meta.get("max_tokens"),
+            prompt_tokens=llm_meta.get("prompt_tokens"),
+            completion_tokens=llm_meta.get("completion_tokens"),
+            total_tokens=llm_meta.get("total_tokens"),
         )
         db.add(fork_asst_msg)
         await db.commit()
 
     headers = {"X-Branch-Id": str(new_branch_id)}
     return StreamingResponse(stream_generator(), media_type="text/plain", headers=headers)
+
+@app.get("/users/{user_email}/cost")
+async def get_user_cost(user_email: str, db: AsyncSession = Depends(get_db)) -> Dict[str, Any]:
+    # 1. Query the database to get the sum of tokens grouped by model
+    stmt = (
+        select(
+            models.Message.model_choice,
+            func.sum(models.Message.prompt_tokens).label("total_prompt_tokens"),
+            func.sum(models.Message.completion_tokens).label("total_completion_tokens")
+        )
+        .join(models.Conversation, models.Message.conversation_id == models.Conversation.id)
+        .where(models.Conversation.user_email == user_email)
+        .where(models.Message.model_choice.is_not(None))
+        .group_by(models.Message.model_choice)
+    )
+    
+    result = await db.execute(stmt)
+    rows = result.all()
+    
+    total_cost = 0.0
+    breakdown: list[dict[str, object]] = []
+    
+    # 2. Iterate over the aggregated SQL results and calculate the dollar amounts
+    for row in rows:
+        model = row.model_choice
+        p_tokens = row.total_prompt_tokens or 0
+        c_tokens = row.total_completion_tokens or 0
+        
+        # Fallback to free (0.0) if a model isn't found in the dictionary
+        rates = PRICING_TIERS.get(model, {"input": 0.0, "output": 0.0})
+        
+        # Math: (Tokens / 1,000,000) * Rate
+        model_cost = (p_tokens / 1_000_000 * rates["input"]) + (c_tokens / 1_000_000 * rates["output"])
+        total_cost += model_cost
+        
+        breakdown.append({
+            "model": model,
+            "prompt_tokens": p_tokens,
+            "completion_tokens": c_tokens,
+            "cost_usd": round(model_cost, 6) # Rounded to 6 decimal places for micro-cents
+        })
+        
+    return {
+        "user_email": user_email,
+        "total_cost_usd": round(total_cost, 4),
+        "breakdown": breakdown
+    }

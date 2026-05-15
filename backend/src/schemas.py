@@ -14,6 +14,9 @@ class MessageSchema(BaseModel):
     model_choice: Optional[str] = None
     temperature: Optional[float] = None
     max_output_tokens: Optional[int] = None
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+    total_tokens: Optional[int] = None
 
     class Config:
         from_attributes = True
