@@ -75,7 +75,8 @@ class Message(Base):
         ),
         CheckConstraint("role IN ('user', 'assistant')", name="ck_message_role"),
         CheckConstraint(
-            "status IN ('pending', 'completed', 'failed')", name="ck_message_status"
+            "status IN ('pending', 'completed', 'failed', 'aborted')",
+            name="ck_message_status",
         ),
         CheckConstraint(
             "(role = 'user' AND model_choice IS NULL AND temperature IS NULL"
@@ -89,6 +90,9 @@ class Message(Base):
     )
 
     conversation = relationship("Conversation", back_populates="messages")
+    usage = relationship(
+        "MessageUsage", back_populates="message", uselist=False, cascade="all, delete-orphan"
+    )
 
     def __repr__(self):
         return (
@@ -97,3 +101,32 @@ class Message(Base):
             f"role={self.role!r} "
             f"seq={self.sequence_number!r}>"
         )
+
+
+class MessageUsage(Base):
+    __tablename__ = "message_usage"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    message_id = Column(
+        String,
+        ForeignKey("messages.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+
+    input_tokens  = Column(Integer, nullable=False, default=0)
+    output_tokens = Column(Integer, nullable=False, default=0)
+
+    input_cost_usd  = Column(Float, nullable=False, default=0.0)
+    output_cost_usd = Column(Float, nullable=False, default=0.0)
+    total_cost_usd  = Column(Float, nullable=False, default=0.0)
+
+    # Values: 'completed', 'aborted', 'error'
+    completion_status      = Column(String, nullable=False, default="completed")
+    abort_reason           = Column(String, nullable=True)
+    output_tokens_at_abort = Column(Integer, nullable=True)
+
+    model      = Column(String, nullable=False)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+
+    message = relationship("Message", back_populates="usage")

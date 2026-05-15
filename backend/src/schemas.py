@@ -38,3 +38,29 @@ class ConversationDetailResponse(ConversationResponse):
 
 class TitleUpdateRequest(BaseModel):
     title: str
+
+
+class MessageUsageSchema(BaseModel):
+    message_id: str
+    completion_status: str
+    abort_reason: Optional[str] = None
+    input_tokens: int
+    output_tokens: int
+    input_cost_usd: float
+    output_cost_usd: float
+    total_cost_usd: float
+    model: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ConversationUsageSummary(BaseModel):
+    conversation_id: str
+    total_messages: int
+    completed: int
+    aborted: int
+    total_input_tokens: int
+    total_output_tokens: int
+    total_cost_usd: float

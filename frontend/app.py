@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import re
+import time
 from typing import Any, Generator, Optional
 from streamlit.runtime.uploaded_file_manager import UploadedFile
 
@@ -39,6 +40,12 @@ if "forking_msg_id" not in st.session_state:
 
 if "forking_content" not in st.session_state:
     st.session_state.forking_content = ""
+
+if "is_streaming" not in st.session_state:
+    st.session_state.is_streaming = False
+
+if "partial_response" not in st.session_state:
+    st.session_state.partial_response = ""
 
 # --- API Client Layer ---
 def create_conversation() -> None:
@@ -317,7 +324,7 @@ if st.session_state.current_conv_id:
                         "b0_turn": b0_turn,
                     }
 
-                if asst_msg and not fork_action:
+                if asst_msg and asst_msg.get("content") and not fork_action:
                     with st.chat_message("assistant"):
                         # MERGE FIX: Apply image memory split
                         st.markdown(asst_msg["content"].split("🖼️")[0].strip())
@@ -342,13 +349,22 @@ if st.session_state.current_conv_id:
 
         # Stream the forked response after the turn list (outside any chat_message context)
         if fork_action:
+            stop_fork_placeholder = st.empty()
             with st.chat_message("assistant"):
                 placeholder = st.empty()
                 full = ""
+                st.session_state.is_streaming = True
+                st.session_state.partial_response = ""
+                stop_fork_placeholder.button("⏹ Stop generating", key="stop_fork_btn", type="secondary")
                 for chunk in fork_message(conv_id, fork_action["msg_id"], fork_action["content"], model_choice=st.session_state.current_model):
                     full += chunk
+                    st.session_state.partial_response = full.split("🖼️")[0].strip()
                     display_text = full.split("🖼️")[0].strip()
                     placeholder.markdown(display_text + "▌")
+                    time.sleep(0.03)
+                st.session_state.is_streaming = False
+                st.session_state.partial_response = ""
+                stop_fork_placeholder.empty()
                 final_display = full.split("🖼️")[0].strip()
                 placeholder.markdown(final_display)
                 
@@ -362,6 +378,14 @@ if st.session_state.current_conv_id:
 
         dynamic_uploader_key = f"uploader_{conv_id}_{st.session_state.uploader_key_counter}"
 
+        # Show partial response left over from a stopped stream
+        if st.session_state.partial_response and not st.session_state.is_streaming:
+            with st.chat_message("assistant"):
+                st.markdown(st.session_state.partial_response + " *(stopped)*")
+            st.session_state.partial_response = ""
+
+        stop_chat_placeholder = st.empty()
+
         if prompt := st.chat_input("Type your message here..."):
             with st.chat_message("user"):
                 st.markdown(prompt)
@@ -371,15 +395,23 @@ if st.session_state.current_conv_id:
             with st.chat_message("assistant"):
                 response_placeholder = st.empty()
                 full_response = ""
-                
+                st.session_state.is_streaming = True
+                st.session_state.partial_response = ""
+
+                stop_chat_placeholder.button("⏹ Stop generating", key="stop_chat_btn", type="secondary")
                 for chunk in send_chat_message(conv_id, prompt, branch_id=current_branch, uploaded_image=uploaded_image, model_choice=st.session_state.current_model):
                     full_response += chunk
+                    st.session_state.partial_response = full_response.split("🖼️")[0].strip()
                     display_text = full_response.split("🖼️")[0].strip()
                     response_placeholder.markdown(display_text + "▌")
-                
+                    time.sleep(0.03)
+
+                stop_chat_placeholder.empty()
+                st.session_state.is_streaming = False
+                st.session_state.partial_response = ""
                 final_display = full_response.split("🖼️")[0].strip()
                 response_placeholder.markdown(final_display)
-                
+
                 st.session_state.uploader_key_counter += 1
                 st.rerun()
 

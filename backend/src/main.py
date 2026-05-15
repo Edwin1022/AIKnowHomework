@@ -13,11 +13,12 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
 
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
+from sqlalchemy import func as sqlfunc
 
 from groq.types.chat import ChatCompletionMessageParam
 
@@ -29,8 +30,11 @@ from backend.src.schemas import (
     ConversationDetailResponse,
     CreateConversationRequest,
     TitleUpdateRequest,
+    MessageUsageSchema,
+    ConversationUsageSummary,
 )
 from backend.src.services import groq_stream, generate_conversation_title
+from backend.src.pricing import calculate_cost
 
 # --- Lifespan Setup for Async DB Initialization ---
 @asynccontextmanager
@@ -113,12 +117,13 @@ def compress_image_sync(image_bytes: bytes) -> bytes:
 
 @app.post("/conversations/{conversation_id}/chat")
 async def chat(
+    request: Request,
     conversation_id: str,
     content: str = Form(...),
     model_choice: str = Form(...),
     branch_id: int = Form(0),
     image: Optional[UploadFile] = File(None),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     # 1. Fetch the conversation and its messages
     stmt = select(models.Conversation).options(selectinload(models.Conversation.messages)).where(models.Conversation.id == conversation_id)
@@ -249,49 +254,115 @@ async def chat(
     print("="*50 + "\n")
 
     # 6. Stream the assistant's response
+    estimated_input_tokens = sum(
+        len(m["content"]) if isinstance(m.get("content"), str) else 0
+        for m in history
+    ) // 4
+
     async def stream_generator():
         llm_response = ""
         llm_meta: dict[str, object] = {}
-        
-        async for chunk in groq_stream(cast(list[ChatCompletionMessageParam], history), model=model_choice):
-            if isinstance(chunk, dict):
-                llm_meta = chunk
-            else:
-                llm_response += chunk
-                yield chunk
+        output_tokens_streamed = 0
 
         assistant_msg = models.Message(
             conversation_id=conversation_id,
             role="assistant",
-            content=llm_response.strip(),
-            status="completed",
+            content=None,
+            status="pending",
             sequence_number=assistant_seq,
             turn_number=turn_number,
             branch_id=branch_id,
             fork_start_seq=fork_start_seq,
-            model_choice=llm_meta.get("model"),
-            temperature=llm_meta.get("temperature"),
-            max_output_tokens=llm_meta.get("max_tokens"),
         )
         db.add(assistant_msg)
-
-        conv.updated_at = datetime.now(timezone.utc).replace(tzinfo=None) # type: ignore
-
-        if branch_id == 0 and user_seq == 1:
-            generated_title = str(await generate_conversation_title(content, llm_response))
-            conv.title = generated_title # type: ignore
-
         await db.commit()
+        await db.refresh(assistant_msg)
+
+        try:
+            async for chunk in groq_stream(cast(list[ChatCompletionMessageParam], history), model=model_choice):
+                if await request.is_disconnected():
+                    assistant_msg.status = "aborted"
+                    assistant_msg.content = llm_response.strip() or None
+
+                    costs = calculate_cost(model_choice, estimated_input_tokens, output_tokens_streamed)
+                    db.add(models.MessageUsage(
+                        message_id=assistant_msg.id,
+                        input_tokens=estimated_input_tokens,
+                        output_tokens=output_tokens_streamed,
+                        input_cost_usd=costs["input_cost_usd"],
+                        output_cost_usd=costs["output_cost_usd"],
+                        total_cost_usd=costs["input_cost_usd"] + costs["output_cost_usd"],
+                        completion_status="aborted",
+                        abort_reason="client_disconnect",
+                        output_tokens_at_abort=output_tokens_streamed,
+                        model=model_choice,
+                    ))
+                    await db.commit()
+                    return
+
+                if isinstance(chunk, dict):
+                    llm_meta = chunk
+                else:
+                    llm_response += chunk
+                    output_tokens_streamed += 1
+                    yield chunk
+
+            input_tokens  = int(llm_meta.get("input_tokens",  0))
+            output_tokens = int(llm_meta.get("output_tokens", 0))
+            costs = calculate_cost(model_choice, input_tokens, output_tokens)
+
+            assistant_msg.status            = "completed"
+            assistant_msg.content           = llm_response.strip()
+            assistant_msg.model_choice      = llm_meta.get("model")
+            assistant_msg.temperature       = llm_meta.get("temperature")
+            assistant_msg.max_output_tokens = llm_meta.get("max_tokens")
+
+            db.add(models.MessageUsage(
+                message_id=assistant_msg.id,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                input_cost_usd=costs["input_cost_usd"],
+                output_cost_usd=costs["output_cost_usd"],
+                total_cost_usd=costs["input_cost_usd"] + costs["output_cost_usd"],
+                completion_status="completed",
+                model=model_choice,
+            ))
+
+            conv.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)  # type: ignore
+
+            if branch_id == 0 and user_seq == 1:
+                generated_title = str(await generate_conversation_title(content, llm_response))
+                conv.title = generated_title  # type: ignore
+
+            await db.commit()
+
+        except Exception as e:
+            assistant_msg.status  = "failed"
+            assistant_msg.content = None
+            db.add(models.MessageUsage(
+                message_id=assistant_msg.id,
+                input_tokens=0,
+                output_tokens=output_tokens_streamed,
+                input_cost_usd=0.0,
+                output_cost_usd=0.0,
+                total_cost_usd=0.0,
+                completion_status="error",
+                abort_reason=str(e),
+                model=model_choice,
+            ))
+            await db.commit()
+            raise
 
     return StreamingResponse(stream_generator(), media_type="text/plain")
 
 @app.post("/conversations/{conversation_id}/messages/{message_id}/fork")
 async def fork_message(
+    request: Request,
     conversation_id: str,
     message_id: str,
     content: str = Form(...),
-    model_choice: str = Form("llama-3.3-70b-versatile"), 
-    image: Optional[UploadFile] = File(None), # Upgraded to accept images
+    model_choice: str = Form("llama-3.3-70b-versatile"),
+    image: Optional[UploadFile] = File(None),
     db: AsyncSession = Depends(get_db),
 ):
     stmt = select(models.Conversation).options(selectinload(models.Conversation.messages)).where(models.Conversation.id == conversation_id)
@@ -412,32 +483,156 @@ async def fork_message(
     db.add(fork_user_msg)
     await db.commit()
 
+    estimated_input_tokens = sum(
+        len(m["content"]) if isinstance(m.get("content"), str) else 0
+        for m in history
+    ) // 4
+
     async def stream_generator():
         llm_response = ""
         llm_meta: dict[str, object] = {}
-        
-        async for chunk in groq_stream(cast(list[ChatCompletionMessageParam], history), model=model_choice):
-            if isinstance(chunk, dict):
-                llm_meta = chunk
-            else:
-                llm_response += chunk
-                yield chunk
+        output_tokens_streamed = 0
 
         fork_asst_msg = models.Message(
             conversation_id=conversation_id,
             role="assistant",
-            content=llm_response.strip(),
-            status="completed",
+            content=None,
+            status="pending",
             sequence_number=2,
             turn_number=1,
             branch_id=new_branch_id,
             fork_start_seq=fork_start_seq,
-            model_choice=llm_meta.get("model"),
-            temperature=llm_meta.get("temperature"),
-            max_output_tokens=llm_meta.get("max_tokens"),
         )
         db.add(fork_asst_msg)
         await db.commit()
+        await db.refresh(fork_asst_msg)
+
+        try:
+            async for chunk in groq_stream(cast(list[ChatCompletionMessageParam], history), model=model_choice):
+                if await request.is_disconnected():
+                    fork_asst_msg.status = "aborted"
+                    fork_asst_msg.content = llm_response.strip() or None
+
+                    costs = calculate_cost(model_choice, estimated_input_tokens, output_tokens_streamed)
+                    db.add(models.MessageUsage(
+                        message_id=fork_asst_msg.id,
+                        input_tokens=estimated_input_tokens,
+                        output_tokens=output_tokens_streamed,
+                        input_cost_usd=costs["input_cost_usd"],
+                        output_cost_usd=costs["output_cost_usd"],
+                        total_cost_usd=costs["input_cost_usd"] + costs["output_cost_usd"],
+                        completion_status="aborted",
+                        abort_reason="client_disconnect",
+                        output_tokens_at_abort=output_tokens_streamed,
+                        model=model_choice,
+                    ))
+                    await db.commit()
+                    return
+
+                if isinstance(chunk, dict):
+                    llm_meta = chunk
+                else:
+                    llm_response += chunk
+                    output_tokens_streamed += 1
+                    yield chunk
+
+            input_tokens  = int(llm_meta.get("input_tokens",  0))
+            output_tokens = int(llm_meta.get("output_tokens", 0))
+            costs = calculate_cost(model_choice, input_tokens, output_tokens)
+
+            fork_asst_msg.status            = "completed"
+            fork_asst_msg.content           = llm_response.strip()
+            fork_asst_msg.model_choice      = llm_meta.get("model")
+            fork_asst_msg.temperature       = llm_meta.get("temperature")
+            fork_asst_msg.max_output_tokens = llm_meta.get("max_tokens")
+
+            db.add(models.MessageUsage(
+                message_id=fork_asst_msg.id,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                input_cost_usd=costs["input_cost_usd"],
+                output_cost_usd=costs["output_cost_usd"],
+                total_cost_usd=costs["input_cost_usd"] + costs["output_cost_usd"],
+                completion_status="completed",
+                model=model_choice,
+            ))
+            await db.commit()
+
+        except Exception as e:
+            fork_asst_msg.status  = "failed"
+            fork_asst_msg.content = None
+            db.add(models.MessageUsage(
+                message_id=fork_asst_msg.id,
+                input_tokens=0,
+                output_tokens=output_tokens_streamed,
+                input_cost_usd=0.0,
+                output_cost_usd=0.0,
+                total_cost_usd=0.0,
+                completion_status="error",
+                abort_reason=str(e),
+                model=model_choice,
+            ))
+            await db.commit()
+            raise
 
     headers = {"X-Branch-Id": str(new_branch_id)}
     return StreamingResponse(stream_generator(), media_type="text/plain", headers=headers)
+
+
+# --- Routes: Usage ---
+
+@app.get("/messages/{message_id}/usage", response_model=MessageUsageSchema)
+async def get_message_usage(message_id: str, db: AsyncSession = Depends(get_db)):
+    stmt = select(models.MessageUsage).where(models.MessageUsage.message_id == message_id)
+    result = await db.execute(stmt)
+    usage = result.scalar_one_or_none()
+    if not usage:
+        raise HTTPException(status_code=404, detail="Usage record not found")
+    return usage
+
+
+@app.get("/conversations/{conversation_id}/usage", response_model=ConversationUsageSummary)
+async def get_conversation_usage(conversation_id: str, db: AsyncSession = Depends(get_db)):
+    conv_stmt = select(models.Conversation).where(models.Conversation.id == conversation_id)
+    if not (await db.execute(conv_stmt)).scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    agg_stmt = (
+        select(
+            sqlfunc.count(models.MessageUsage.id).label("total_messages"),
+            sqlfunc.sum(models.MessageUsage.input_tokens).label("total_input_tokens"),
+            sqlfunc.sum(models.MessageUsage.output_tokens).label("total_output_tokens"),
+            sqlfunc.sum(models.MessageUsage.total_cost_usd).label("total_cost_usd"),
+        )
+        .join(models.Message, models.MessageUsage.message_id == models.Message.id)
+        .where(models.Message.conversation_id == conversation_id)
+    )
+    row = (await db.execute(agg_stmt)).one()
+
+    completed = (await db.execute(
+        select(sqlfunc.count(models.MessageUsage.id))
+        .join(models.Message, models.MessageUsage.message_id == models.Message.id)
+        .where(
+            models.Message.conversation_id == conversation_id,
+            models.MessageUsage.completion_status == "completed",
+        )
+    )).scalar() or 0
+
+    aborted = (await db.execute(
+        select(sqlfunc.count(models.MessageUsage.id))
+        .join(models.Message, models.MessageUsage.message_id == models.Message.id)
+        .where(
+            models.Message.conversation_id == conversation_id,
+            models.MessageUsage.completion_status == "aborted",
+        )
+    )).scalar() or 0
+
+    return ConversationUsageSummary(
+        conversation_id=conversation_id,
+        total_messages=row.total_messages or 0,
+        completed=completed,
+        aborted=aborted,
+        total_input_tokens=row.total_input_tokens or 0,
+        total_output_tokens=row.total_output_tokens or 0,
+        total_cost_usd=row.total_cost_usd or 0.0,
+    )
