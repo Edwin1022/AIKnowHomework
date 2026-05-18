@@ -44,6 +44,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="LLM Chat Application (Async & Modular)", lifespan=lifespan)
 
+_cancel_flags: dict[str, asyncio.Event] = {}
+
 # --- Routes: Chat Management ---
 
 @app.post("/conversations", response_model=ConversationResponse)
@@ -259,12 +261,14 @@ async def chat(
         for m in history
     ) // 4
 
+    assistant_msg_id = str(uuid.uuid4())
+
     async def stream_generator():
         llm_response = ""
         llm_meta: dict[str, object] = {}
-        output_tokens_streamed = 0
 
         assistant_msg = models.Message(
+            id=assistant_msg_id,
             conversation_id=conversation_id,
             role="assistant",
             content=None,
@@ -278,33 +282,42 @@ async def chat(
         await db.commit()
         await db.refresh(assistant_msg)
 
+        cancel_event = asyncio.Event()
+        _cancel_flags[assistant_msg_id] = cancel_event
+
+        async def save_abort(reason: str) -> None:
+            estimated_output = len(llm_response) // 4
+            costs = calculate_cost(model_choice, estimated_input_tokens, estimated_output)
+            assistant_msg.status = "aborted"
+            assistant_msg.content = llm_response.strip() or None
+            db.add(models.MessageUsage(
+                message_id=assistant_msg_id,
+                input_tokens=estimated_input_tokens,
+                output_tokens=estimated_output,
+                input_cost_usd=costs["input_cost_usd"],
+                output_cost_usd=costs["output_cost_usd"],
+                total_cost_usd=costs["input_cost_usd"] + costs["output_cost_usd"],
+                completion_status="aborted",
+                abort_reason=reason,
+                output_tokens_at_abort=estimated_output,
+                model=model_choice,
+            ))
+            await db.commit()
+
         try:
             async for chunk in groq_stream(cast(list[ChatCompletionMessageParam], history), model=model_choice):
-                if await request.is_disconnected():
-                    assistant_msg.status = "aborted"
-                    assistant_msg.content = llm_response.strip() or None
+                if cancel_event.is_set():
+                    await save_abort("user_cancelled")
+                    return
 
-                    costs = calculate_cost(model_choice, estimated_input_tokens, output_tokens_streamed)
-                    db.add(models.MessageUsage(
-                        message_id=assistant_msg.id,
-                        input_tokens=estimated_input_tokens,
-                        output_tokens=output_tokens_streamed,
-                        input_cost_usd=costs["input_cost_usd"],
-                        output_cost_usd=costs["output_cost_usd"],
-                        total_cost_usd=costs["input_cost_usd"] + costs["output_cost_usd"],
-                        completion_status="aborted",
-                        abort_reason="client_disconnect",
-                        output_tokens_at_abort=output_tokens_streamed,
-                        model=model_choice,
-                    ))
-                    await db.commit()
+                if await request.is_disconnected():
+                    await save_abort("client_disconnect")
                     return
 
                 if isinstance(chunk, dict):
                     llm_meta = chunk
                 else:
                     llm_response += chunk
-                    output_tokens_streamed += 1
                     yield chunk
 
             input_tokens  = int(llm_meta.get("input_tokens",  0))
@@ -318,7 +331,7 @@ async def chat(
             assistant_msg.max_output_tokens = llm_meta.get("max_tokens")
 
             db.add(models.MessageUsage(
-                message_id=assistant_msg.id,
+                message_id=assistant_msg_id,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 input_cost_usd=costs["input_cost_usd"],
@@ -340,9 +353,9 @@ async def chat(
             assistant_msg.status  = "failed"
             assistant_msg.content = None
             db.add(models.MessageUsage(
-                message_id=assistant_msg.id,
+                message_id=assistant_msg_id,
                 input_tokens=0,
-                output_tokens=output_tokens_streamed,
+                output_tokens=0,
                 input_cost_usd=0.0,
                 output_cost_usd=0.0,
                 total_cost_usd=0.0,
@@ -352,8 +365,10 @@ async def chat(
             ))
             await db.commit()
             raise
+        finally:
+            _cancel_flags.pop(assistant_msg_id, None)
 
-    return StreamingResponse(stream_generator(), media_type="text/plain")
+    return StreamingResponse(stream_generator(), media_type="text/plain", headers={"X-Message-Id": assistant_msg_id})
 
 @app.post("/conversations/{conversation_id}/messages/{message_id}/fork")
 async def fork_message(
@@ -488,12 +503,14 @@ async def fork_message(
         for m in history
     ) // 4
 
+    fork_asst_msg_id = str(uuid.uuid4())
+
     async def stream_generator():
         llm_response = ""
         llm_meta: dict[str, object] = {}
-        output_tokens_streamed = 0
 
         fork_asst_msg = models.Message(
+            id=fork_asst_msg_id,
             conversation_id=conversation_id,
             role="assistant",
             content=None,
@@ -507,33 +524,42 @@ async def fork_message(
         await db.commit()
         await db.refresh(fork_asst_msg)
 
+        cancel_event = asyncio.Event()
+        _cancel_flags[fork_asst_msg_id] = cancel_event
+
+        async def save_abort(reason: str) -> None:
+            estimated_output = len(llm_response) // 4
+            costs = calculate_cost(model_choice, estimated_input_tokens, estimated_output)
+            fork_asst_msg.status = "aborted"
+            fork_asst_msg.content = llm_response.strip() or None
+            db.add(models.MessageUsage(
+                message_id=fork_asst_msg_id,
+                input_tokens=estimated_input_tokens,
+                output_tokens=estimated_output,
+                input_cost_usd=costs["input_cost_usd"],
+                output_cost_usd=costs["output_cost_usd"],
+                total_cost_usd=costs["input_cost_usd"] + costs["output_cost_usd"],
+                completion_status="aborted",
+                abort_reason=reason,
+                output_tokens_at_abort=estimated_output,
+                model=model_choice,
+            ))
+            await db.commit()
+
         try:
             async for chunk in groq_stream(cast(list[ChatCompletionMessageParam], history), model=model_choice):
-                if await request.is_disconnected():
-                    fork_asst_msg.status = "aborted"
-                    fork_asst_msg.content = llm_response.strip() or None
+                if cancel_event.is_set():
+                    await save_abort("user_cancelled")
+                    return
 
-                    costs = calculate_cost(model_choice, estimated_input_tokens, output_tokens_streamed)
-                    db.add(models.MessageUsage(
-                        message_id=fork_asst_msg.id,
-                        input_tokens=estimated_input_tokens,
-                        output_tokens=output_tokens_streamed,
-                        input_cost_usd=costs["input_cost_usd"],
-                        output_cost_usd=costs["output_cost_usd"],
-                        total_cost_usd=costs["input_cost_usd"] + costs["output_cost_usd"],
-                        completion_status="aborted",
-                        abort_reason="client_disconnect",
-                        output_tokens_at_abort=output_tokens_streamed,
-                        model=model_choice,
-                    ))
-                    await db.commit()
+                if await request.is_disconnected():
+                    await save_abort("client_disconnect")
                     return
 
                 if isinstance(chunk, dict):
                     llm_meta = chunk
                 else:
                     llm_response += chunk
-                    output_tokens_streamed += 1
                     yield chunk
 
             input_tokens  = int(llm_meta.get("input_tokens",  0))
@@ -547,7 +573,7 @@ async def fork_message(
             fork_asst_msg.max_output_tokens = llm_meta.get("max_tokens")
 
             db.add(models.MessageUsage(
-                message_id=fork_asst_msg.id,
+                message_id=fork_asst_msg_id,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 input_cost_usd=costs["input_cost_usd"],
@@ -562,9 +588,9 @@ async def fork_message(
             fork_asst_msg.status  = "failed"
             fork_asst_msg.content = None
             db.add(models.MessageUsage(
-                message_id=fork_asst_msg.id,
+                message_id=fork_asst_msg_id,
                 input_tokens=0,
-                output_tokens=output_tokens_streamed,
+                output_tokens=0,
                 input_cost_usd=0.0,
                 output_cost_usd=0.0,
                 total_cost_usd=0.0,
@@ -574,10 +600,19 @@ async def fork_message(
             ))
             await db.commit()
             raise
+        finally:
+            _cancel_flags.pop(fork_asst_msg_id, None)
 
-    headers = {"X-Branch-Id": str(new_branch_id)}
+    headers = {"X-Branch-Id": str(new_branch_id), "X-Message-Id": fork_asst_msg_id}
     return StreamingResponse(stream_generator(), media_type="text/plain", headers=headers)
 
+
+@app.post("/messages/{message_id}/cancel")
+async def cancel_message(message_id: str):
+    event = _cancel_flags.get(message_id)
+    if event:
+        event.set()
+    return {"cancelled": bool(event)}
 
 # --- Routes: Usage ---
 
