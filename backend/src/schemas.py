@@ -17,6 +17,7 @@ class MessageSchema(BaseModel):
     prompt_tokens: Optional[int] = None
     completion_tokens: Optional[int] = None
     total_tokens: Optional[int] = None
+    message_tokens: Optional[int] = None
 
     class Config:
         from_attributes = True

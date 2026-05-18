@@ -71,6 +71,7 @@ class Message(Base):
     prompt_tokens = Column(Integer, nullable=True)
     completion_tokens = Column(Integer, nullable=True)
     total_tokens = Column(Integer, nullable=True)
+    message_tokens = Column(Integer, nullable=True)
 
     __table_args__ = (
         UniqueConstraint(

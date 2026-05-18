@@ -31,7 +31,7 @@ from backend.src.schemas import (
     TitleUpdateRequest,
 )
 from backend.src.services import PRICING_TIERS, groq_stream, generate_conversation_title
-from backend.src.helpers import enforce_context_window
+from backend.src.helpers import count_message_tokens, get_safe_token_limit
 
 # --- Lifespan Setup for Async DB Initialization ---
 @asynccontextmanager
@@ -190,6 +190,27 @@ async def chat(
         raw_history_messages = trunk_before + branch_messages
 
     # 4. Save the User Message
+    user_msg_tokens = count_message_tokens(llm_content_payload, model_choice)
+    
+    max_history_tokens = get_safe_token_limit(model_choice)
+    available_tokens = max_history_tokens - user_msg_tokens
+    
+    kept_history_messages: List[models.Message] = []
+    accumulated_tokens = 0
+    
+    for msg in reversed(raw_history_messages):
+        # Read from the new column (with the same fallback for old rows)
+        msg_tokens = msg.message_tokens if msg.message_tokens is not None else (max(1, len(msg.content or "") // 4) + 5)
+            
+        if accumulated_tokens + msg_tokens <= available_tokens:
+            kept_history_messages.insert(0, msg)
+            accumulated_tokens += msg_tokens
+        else:
+            print(f"Context Limit: Pruned older history past {accumulated_tokens} tokens.")
+            break
+            
+    raw_history_messages = kept_history_messages
+    
     user_msg = models.Message(
         conversation_id=conversation_id,
         role="user",
@@ -199,6 +220,7 @@ async def chat(
         turn_number=turn_number,
         branch_id=branch_id,
         fork_start_seq=fork_start_seq,
+        message_tokens=user_msg_tokens,
     )
     db.add(user_msg)
     
@@ -209,7 +231,7 @@ async def chat(
     sticky_image_memory = ""
     
     for msg in raw_history_messages:
-        if msg.role == "assistant" and "🖼️ Image Memory:" in (msg.content or ""):
+        if str(msg.role) == "assistant" and "🖼️ Image Memory:" in (msg.content or ""):
             parts = msg.content.split("🖼️ Image Memory:")
             sticky_image_memory = "🖼️ Image Memory:" + parts[-1]
     
@@ -233,7 +255,7 @@ async def chat(
         clean_content = re.sub(
             r'!\[.*?\]\(data:.*?;base64,.*?\)', 
             '[Image from previous turn]', 
-            msg.content or "",
+            str(msg.content) or "",
             flags=re.DOTALL
         )
         history.append({"role": msg.role, "content": clean_content})
@@ -243,8 +265,6 @@ async def chat(
         "content": llm_content_payload
     }
     history.append(current_message)
-    
-    history = enforce_context_window(history, model_choice=model_choice)
     
     print("\n" + "="*50)
     print("FINAL HISTORY PAYLOAD GOING TO GROQ:")
@@ -278,6 +298,7 @@ async def chat(
             prompt_tokens=llm_meta.get("prompt_tokens"),
             completion_tokens=llm_meta.get("completion_tokens"),
             total_tokens=llm_meta.get("total_tokens"),
+            message_tokens=llm_meta.get("completion_tokens"),
         )
         db.add(assistant_msg)
 
@@ -364,6 +385,31 @@ async def fork_message(
                 {"type": "text", "text": content + secret_instruction},
                 {"type": "image_url", "image_url": { "url": image_data_url }}
             ]
+    
+    user_msg_tokens = count_message_tokens(llm_content_payload, model_choice)
+    
+    max_history_tokens = get_safe_token_limit(model_choice)
+    available_tokens = max_history_tokens - user_msg_tokens
+
+    trunk_before = sorted(
+        [m for m in conv.messages if m.branch_id == 0 and m.sequence_number < fork_start_seq],
+        key=lambda m: m.sequence_number,
+    )
+
+    kept_history_messages: List[models.Message] = []
+    accumulated_tokens = 0
+    
+    for msg in reversed(trunk_before):
+        msg_tokens = msg.message_tokens if msg.message_tokens is not None else (max(1, len(msg.content or "") // 4) + 5)
+            
+        if accumulated_tokens + msg_tokens <= available_tokens:
+            kept_history_messages.insert(0, msg)
+            accumulated_tokens += msg_tokens
+        else:
+            print(f"Context Limit: Pruned older fork history past {accumulated_tokens} tokens.")
+            break
+
+    trunk_before = kept_history_messages
 
     # --- 2. Reconstruct History & Sticky Memory ---
     trunk_before = sorted(
@@ -403,8 +449,6 @@ async def fork_message(
         history.append({"role": m.role, "content": clean_content})
         
     history.append({"role": "user", "content": llm_content_payload})
-    
-    history = enforce_context_window(history, model_choice=model_choice)
 
     # --- 3. Save and Stream ---
     fork_user_msg = models.Message(
@@ -416,6 +460,7 @@ async def fork_message(
         turn_number=1,
         branch_id=new_branch_id,
         fork_start_seq=fork_start_seq,
+        message_tokens=user_msg_tokens,
     )
     db.add(fork_user_msg)
     await db.commit()
@@ -446,6 +491,7 @@ async def fork_message(
             prompt_tokens=llm_meta.get("prompt_tokens"),
             completion_tokens=llm_meta.get("completion_tokens"),
             total_tokens=llm_meta.get("total_tokens"),
+            message_tokens=llm_meta.get("completion_tokens"),
         )
         db.add(fork_asst_msg)
         await db.commit()

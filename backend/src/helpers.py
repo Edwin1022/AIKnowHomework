@@ -21,27 +21,26 @@ def get_tokenizer(model_choice: str):
         
     return TOKENIZER_CACHE[hf_model_id]
 
-def enforce_context_window(history: List[Dict[str, Any]], model_choice: str, max_tokens: int = MAX_HISTORY_TOKENS) -> List[Dict[str, Any]]:
+def count_message_tokens(content: Union[str, List[Dict[str, Any]]], model_choice: str) -> int:
     tokenizer = get_tokenizer(model_choice)
     
-    def count_tokens(content: Union[str, List[Dict[str, Any]]]) -> int:
-        # Handle standard text content
-        if isinstance(content, str):
-            return len(tokenizer.encode(content))
-        # Handle multimodal dict payloads by extracting the text parts
-        else:
-            text_parts = [item["text"] for item in content if item.get("type") == "text"]
-            combined_text = " ".join(text_parts)
-            return len(tokenizer.encode(combined_text))
-
-    # Calculate initial total tokens (including a small buffer for chat template overhead)
-    total_tokens = sum(count_tokens(msg.get("content", "")) + 5 for msg in history)
+    if isinstance(content, str):
+        return len(tokenizer.encode(content)) + 5 # +5 for ChatML formatting overhead
+    else:
+        # Extract text from multimodal dictionaries
+        text_parts = [item["text"] for item in content if item.get("type") == "text"]
+        combined_text = " ".join(text_parts)
+        return len(tokenizer.encode(combined_text)) + 5
     
-    # Prune oldest messages (protecting index 0, the System Prompt)
-    while total_tokens > max_tokens and len(history) > 2:
-        evicted_msg = history.pop(1) 
-        evicted_tokens = count_tokens(evicted_msg.get("content", "")) + 5
-        total_tokens -= evicted_tokens
-        print(f"Context pruning: Evicted {evicted_msg['role']} message. Freed {evicted_tokens} tokens. Total now: {total_tokens}")
-
-    return history
+def get_safe_token_limit(model_choice: str) -> int:
+    # Note: We reserve ~2,000 tokens from the limit so the AI has room to generate a reply
+    if "llama-3.3-70b-versatile" in model_choice:
+        return 10000 # Groq Free Tier Limit: typically 12,000 TPM
+    elif "meta-llama/llama-4-scout-17b-16e-instruct" in model_choice:
+        return 28000 # Groq Free Tier Limit: typically 30,000 TPM
+    elif "openai/gpt-oss-120b" in model_choice:
+        return 6000  # Groq Free Tier Limit: 8,000 TPM
+    elif "qwen/qwen3-32b" in model_choice:
+        return 4000 # Groq Free Tier Limit: 6,000 TPM
+    else:
+        return 6000  # Safe default
