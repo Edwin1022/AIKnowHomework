@@ -5,7 +5,6 @@ TOKENIZER_CACHE: Dict[str, Any] = {}
 MAX_HISTORY_TOKENS = 125000
 
 def get_tokenizer(model_choice: str):
-    """Fetches and caches tokenizers to prevent blocking API calls."""
     # Map API model names to their Hugging Face repos
     model_map = {
         "llama-3.3-70b-versatile": "meta-llama/Llama-3.3-70B-Instruct",
@@ -23,7 +22,6 @@ def get_tokenizer(model_choice: str):
     return TOKENIZER_CACHE[hf_model_id]
 
 def enforce_context_window(history: List[Dict[str, Any]], model_choice: str, max_tokens: int = MAX_HISTORY_TOKENS) -> List[Dict[str, Any]]:
-    """Prunes old messages from history if the token count exceeds max_tokens."""
     tokenizer = get_tokenizer(model_choice)
     
     def count_tokens(content: Union[str, List[Dict[str, Any]]]) -> int:
