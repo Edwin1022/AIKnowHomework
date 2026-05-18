@@ -31,6 +31,7 @@ from backend.src.schemas import (
     TitleUpdateRequest,
 )
 from backend.src.services import PRICING_TIERS, groq_stream, generate_conversation_title
+from backend.src.helpers import enforce_context_window
 
 # --- Lifespan Setup for Async DB Initialization ---
 @asynccontextmanager
@@ -243,6 +244,8 @@ async def chat(
     }
     history.append(current_message)
     
+    history = enforce_context_window(history, model_choice=model_choice)
+    
     print("\n" + "="*50)
     print("FINAL HISTORY PAYLOAD GOING TO GROQ:")
     pprint.pprint(history, width=120)
@@ -400,6 +403,8 @@ async def fork_message(
         history.append({"role": m.role, "content": clean_content})
         
     history.append({"role": "user", "content": llm_content_payload})
+    
+    history = enforce_context_window(history, model_choice=model_choice)
 
     # --- 3. Save and Stream ---
     fork_user_msg = models.Message(
